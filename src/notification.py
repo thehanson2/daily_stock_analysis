@@ -50,6 +50,7 @@ from src.notification_sender import (
     DiscordSender,
     EmailSender,
     FeishuSender,
+    GotifySender,
     NtfySender,
     PushoverSender,
     PushplusSender,
@@ -58,6 +59,7 @@ from src.notification_sender import (
     TelegramSender,
     WechatSender,
     WECHAT_IMAGE_MAX_BYTES,
+    resolve_gotify_message_endpoint,
     resolve_ntfy_endpoint,
 )
 
@@ -75,6 +77,7 @@ class NotificationChannel(Enum):
     EMAIL = "email"        # 邮件
     PUSHOVER = "pushover"  # Pushover（手机/桌面推送）
     NTFY = "ntfy"          # ntfy
+    GOTIFY = "gotify"      # Gotify
     PUSHPLUS = "pushplus"  # PushPlus（国内推送服务）
     SERVERCHAN3 = "serverchan3"  # Server酱3（手机APP推送服务）
     CUSTOM = "custom"      # 自定义 Webhook
@@ -101,6 +104,7 @@ class ChannelDetector:
             NotificationChannel.EMAIL: "邮件",
             NotificationChannel.PUSHOVER: "Pushover",
             NotificationChannel.NTFY: "ntfy",
+            NotificationChannel.GOTIFY: "Gotify",
             NotificationChannel.PUSHPLUS: "PushPlus",
             NotificationChannel.SERVERCHAN3: "Server酱3",
             NotificationChannel.CUSTOM: "自定义Webhook",
@@ -118,6 +122,7 @@ class NotificationService(
     DiscordSender,
     EmailSender,
     FeishuSender,
+    GotifySender,
     NtfySender,
     PushoverSender,
     PushplusSender,
@@ -173,6 +178,7 @@ class NotificationService(
         DiscordSender.__init__(self, config)
         EmailSender.__init__(self, config)
         FeishuSender.__init__(self, config)
+        GotifySender.__init__(self, config)
         NtfySender.__init__(self, config)
         PushoverSender.__init__(self, config)
         PushplusSender.__init__(self, config)
@@ -312,6 +318,10 @@ class NotificationService(
         ntfy_server_url, ntfy_topic = resolve_ntfy_endpoint(getattr(config, "ntfy_url", None))
         if ntfy_server_url and ntfy_topic:
             channels.append(NotificationChannel.NTFY)
+
+        gotify_endpoint = resolve_gotify_message_endpoint(getattr(config, "gotify_url", None))
+        if gotify_endpoint and (getattr(config, "gotify_token", None) or "").strip():
+            channels.append(NotificationChannel.GOTIFY)
 
         if getattr(config, "pushplus_token", None):
             channels.append(NotificationChannel.PUSHPLUS)
@@ -1733,7 +1743,7 @@ class NotificationService(
         channels_needing_image = {
             ch for ch in target_channels
             if ch.value in self._markdown_to_image_channels
-            and ch != NotificationChannel.NTFY
+            and ch not in {NotificationChannel.NTFY, NotificationChannel.GOTIFY}
         }
         if channels_needing_image:
             from src.md2img import markdown_to_image
@@ -1796,6 +1806,8 @@ class NotificationService(
                     result = self.send_to_pushover(content)
                 elif channel == NotificationChannel.NTFY:
                     result = self.send_to_ntfy(content)
+                elif channel == NotificationChannel.GOTIFY:
+                    result = self.send_to_gotify(content)
                 elif channel == NotificationChannel.PUSHPLUS:
                     result = self.send_to_pushplus(content)
                 elif channel == NotificationChannel.SERVERCHAN3:

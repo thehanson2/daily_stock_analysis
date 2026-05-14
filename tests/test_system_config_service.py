@@ -201,6 +201,24 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         ntfy_without_topic = next(check for check in status["checks"] if check["key"] == "notification")
         self.assertEqual(ntfy_without_topic["status"], "optional")
 
+        self._rewrite_env(*base_lines, "GOTIFY_URL=https://gotify.example")
+        with patch.dict(os.environ, {}, clear=True):
+            status = self.service.get_setup_status()
+        gotify_partial = next(check for check in status["checks"] if check["key"] == "notification")
+        self.assertEqual(gotify_partial["status"], "optional")
+
+        self._rewrite_env(*base_lines, "GOTIFY_URL=https://gotify.example", "GOTIFY_TOKEN=app-token")
+        with patch.dict(os.environ, {}, clear=True):
+            status = self.service.get_setup_status()
+        gotify_complete = next(check for check in status["checks"] if check["key"] == "notification")
+        self.assertEqual(gotify_complete["status"], "configured")
+
+        self._rewrite_env(*base_lines, "GOTIFY_URL=https://gotify.example/message", "GOTIFY_TOKEN=app-token")
+        with patch.dict(os.environ, {}, clear=True):
+            status = self.service.get_setup_status()
+        gotify_with_message = next(check for check in status["checks"] if check["key"] == "notification")
+        self.assertEqual(gotify_with_message["status"], "optional")
+
     def test_get_setup_status_uses_runtime_env_without_reloading_singletons(self) -> None:
         self._rewrite_env("")
 
@@ -372,6 +390,19 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertTrue(
             any(
                 issue["key"] == "NTFY_URL" and issue["code"] == "invalid_ntfy_url"
+                for issue in validation["issues"]
+            )
+        )
+
+    def test_validate_reports_gotify_url_with_message_endpoint(self) -> None:
+        validation = self.service.validate(
+            items=[{"key": "GOTIFY_URL", "value": "https://gotify.example/message"}]
+        )
+
+        self.assertFalse(validation["valid"])
+        self.assertTrue(
+            any(
+                issue["key"] == "GOTIFY_URL" and issue["code"] == "invalid_gotify_url"
                 for issue in validation["issues"]
             )
         )
@@ -1118,6 +1149,50 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertEqual(payload["error_code"], "config_invalid")
         self.assertEqual(payload["stage"], "config_validation")
         self.assertIn("NTFY_URL", payload["message"])
+        mock_post.assert_not_called()
+
+    @patch("src.notification_sender.gotify_sender.requests.post")
+    def test_test_notification_channel_supports_gotify_and_keeps_token_out_of_url(self, mock_post) -> None:
+        mock_post.return_value = self._mock_http_response(200)
+
+        with self._notification_test_env():
+            payload = self.service.test_notification_channel(
+                channel="gotify",
+                items=[
+                    {"key": "GOTIFY_URL", "value": "https://gotify.example"},
+                    {"key": "GOTIFY_TOKEN", "value": "secret-token"},
+                ],
+                title="Test title",
+                content="hello",
+                timeout_seconds=4,
+            )
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(mock_post.call_args.args[0], "https://gotify.example/message")
+        self.assertEqual(mock_post.call_args.kwargs["headers"]["X-Gotify-Key"], "secret-token")
+        self.assertEqual(mock_post.call_args.kwargs["timeout"], 4)
+        self.assertEqual(payload["attempts"][0]["target"], "https://gotify.example")
+        self.assertNotIn("secret-token", str(payload))
+        self.assertNotIn("GOTIFY_URL", self.env_path.read_text(encoding="utf-8"))
+
+    @patch("src.notification_sender.gotify_sender.requests.post")
+    def test_test_notification_channel_rejects_gotify_message_endpoint(self, mock_post) -> None:
+        with self._notification_test_env():
+            payload = self.service.test_notification_channel(
+                channel="gotify",
+                items=[
+                    {"key": "GOTIFY_URL", "value": "https://gotify.example/message"},
+                    {"key": "GOTIFY_TOKEN", "value": "secret-token"},
+                ],
+                title="Test title",
+                content="hello",
+                timeout_seconds=4,
+            )
+
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["error_code"], "config_invalid")
+        self.assertEqual(payload["stage"], "config_validation")
+        self.assertIn("GOTIFY_URL", payload["message"])
         mock_post.assert_not_called()
 
     @patch(

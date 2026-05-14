@@ -16,7 +16,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from dotenv import load_dotenv, dotenv_values
 from dataclasses import dataclass, field
 
@@ -85,7 +85,21 @@ def _has_ntfy_topic_endpoint(value: Optional[str]) -> bool:
     parsed = urlparse(raw_url)
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
         return False
-    return any(segment for segment in parsed.path.split("/") if segment)
+    return any(unquote(segment).strip() for segment in parsed.path.split("/") if segment)
+
+
+def _has_gotify_base_url(value: Optional[str]) -> bool:
+    """Return whether a Gotify URL points at a server base URL, not /message."""
+    raw_url = (value or "").strip().rstrip("/")
+    if not raw_url:
+        return False
+    parsed = urlparse(raw_url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return False
+    if parsed.query or parsed.fragment:
+        return False
+    path_segments = [segment for segment in parsed.path.split("/") if segment]
+    return not (path_segments and path_segments[-1].lower() == "message")
 
 
 AGENT_MAX_STEPS_DEFAULT = 10
@@ -748,6 +762,10 @@ class Config:
     # ntfy 配置（完整 topic endpoint，例如 https://ntfy.sh/my-topic）
     ntfy_url: Optional[str] = None
     ntfy_token: Optional[str] = None
+
+    # Gotify 配置（server base URL；sender 会拼接 /message）
+    gotify_url: Optional[str] = None
+    gotify_token: Optional[str] = None
     
     # 自定义 Webhook（支持多个，逗号分隔）
     # 适用于：钉钉、Discord、Slack、自建服务等任意支持 POST JSON 的 Webhook
@@ -1489,6 +1507,8 @@ class Config:
             pushover_api_token=os.getenv('PUSHOVER_API_TOKEN'),
             ntfy_url=os.getenv('NTFY_URL'),
             ntfy_token=os.getenv('NTFY_TOKEN'),
+            gotify_url=os.getenv('GOTIFY_URL'),
+            gotify_token=os.getenv('GOTIFY_TOKEN'),
             pushplus_token=os.getenv('PUSHPLUS_TOKEN'),
             pushplus_topic=os.getenv('PUSHPLUS_TOPIC'),
             serverchan3_sendkey=os.getenv('SERVERCHAN3_SENDKEY'),
@@ -2482,6 +2502,11 @@ class Config:
             or (self.email_sender and self.email_password)
             or (self.pushover_user_key and self.pushover_api_token)
             or _has_ntfy_topic_endpoint(self.ntfy_url)
+            or (
+                self.gotify_url
+                and (self.gotify_token or "").strip()
+                and _has_gotify_base_url(self.gotify_url)
+            )
             or self.pushplus_token
             or self.serverchan3_sendkey
             or self.custom_webhook_urls
@@ -2504,6 +2529,24 @@ class Config:
                 severity="error",
                 message="NTFY_URL 必须包含 topic path，例如 https://ntfy.sh/my-topic",
                 field="NTFY_URL",
+            ))
+
+        if self.gotify_url and not _has_gotify_base_url(self.gotify_url):
+            issues.append(ConfigIssue(
+                severity="error",
+                message="GOTIFY_URL 必须是 Gotify server base URL，不包含 /message，例如 https://gotify.example",
+                field="GOTIFY_URL",
+            ))
+
+        if (
+            self.gotify_url
+            and _has_gotify_base_url(self.gotify_url)
+            and not (self.gotify_token or "").strip()
+        ):
+            issues.append(ConfigIssue(
+                severity="warning",
+                message="已配置 GOTIFY_URL，但缺少 GOTIFY_TOKEN，Gotify 渠道不会启用",
+                field="GOTIFY_TOKEN",
             ))
 
         if self.notification_quiet_hours:
