@@ -490,7 +490,7 @@ class TushareFetcher(BaseFetcher):
                 )
             else:
                 # Regular A-share stocks use daily interface
-                raise DataFetchError("Simulated failure for A-share daily data") 
+                #raise DataFetchError("Simulated failure for A-share daily data") 
                 df = self._api.daily(
                     ts_code=ts_code,
                     start_date=ts_start,
