@@ -20,6 +20,46 @@ for _mod in ("litellm", "google.generativeai", "google.genai", "anthropic"):
 import pytest
 from unittest.mock import PropertyMock
 
+_OPENAI_COMPATIBILITY_PAYLOAD_FIXTURES = [
+    # Repro case 1 (Issue #1279): OpenAI-compatible provider message.content is None while text is in content_blocks.
+    (
+        "openai/cpa-compatible",
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "content_blocks": [
+                            {"type": "text", "text": "block "},
+                            {"type": "text", "text": "response"},
+                        ],
+                    },
+                }
+            ],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+        },
+        "block response",
+    ),
+    # Repro case 2: OpenAI-compatible provider returns message.content as list-of-blocks.
+    (
+        "openai/list-content-provider",
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "list "},
+                            {"type": "text", "text": "response"},
+                        ],
+                    },
+                }
+            ],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+        },
+        "list response",
+    ),
+]
+
 
 # ---------------------------------------------------------------------------
 # Analyzer.generate_text()
@@ -140,6 +180,55 @@ class TestAnalyzerGenerateText:
         assert len(dispatch_calls) == 2
         assert dispatch_calls[0]["stream"] is True
         assert "stream" not in dispatch_calls[1]
+
+    @pytest.mark.parametrize(
+        "provider_model,response_payload,expected_text",
+        _OPENAI_COMPATIBILITY_PAYLOAD_FIXTURES,
+        ids=["issue1279-message-content-null", "issue1279-message-content-list"],
+    )
+    def test_call_litellm_extracts_external_provider_text_shapes(self, provider_model, response_payload, expected_text):
+        analyzer = self._make_analyzer()
+        analyzer._config_override = SimpleNamespace(
+            litellm_model=provider_model,
+            litellm_fallback_models=[],
+            llm_model_list=[],
+        )
+        with patch.object(analyzer, "_dispatch_litellm_completion", return_value=response_payload):
+            text, model_used, usage = analyzer._call_litellm(
+                "prompt",
+                {"max_tokens": 128, "temperature": 0.2},
+            )
+
+        assert text == expected_text
+        assert model_used == provider_model
+        assert usage == response_payload["usage"]
+
+    def test_call_litellm_falls_back_to_message_content_when_blocks_empty(self):
+        analyzer = self._make_analyzer()
+        analyzer._config_override = SimpleNamespace(
+            litellm_model="openai/deepseek-chat",
+            litellm_fallback_models=[],
+            llm_model_list=[],
+        )
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    content_blocks=[],
+                    message=SimpleNamespace(content="message response"),
+                )
+            ],
+            usage=None,
+        )
+
+        with patch.object(analyzer, "_dispatch_litellm_completion", return_value=response):
+            text, model_used, usage = analyzer._call_litellm(
+                "prompt",
+                {"max_tokens": 128, "temperature": 0.2},
+            )
+
+        assert text == "message response"
+        assert model_used == "openai/deepseek-chat"
+        assert usage == {}
 
     def test_call_litellm_normalizes_kimi_k26_temperature(self):
         analyzer = self._make_analyzer()
@@ -588,6 +677,7 @@ class TestMarketAnalyzerBypassFix:
             cfg.llm_model_list = []
             cfg.openai_base_url = None
             cfg.market_review_region = "cn"
+            cfg.market_review_color_scheme = "green_up"
             cfg.report_language = "zh"
             mock_cfg.return_value = cfg
             mock_cfg2.return_value = cfg
@@ -990,6 +1080,43 @@ Sector text.
         assert "CNY 100m" not in result
         assert "Turnover (USD bn)" in result
         assert "| S&P 500 | 5200.00 |" in result
+
+    def test_indices_block_uses_configured_red_up_color_scheme(self):
+        from src.market_analyzer import MarketOverview, MarketIndex
+
+        ma = self._make_market_analyzer_with_mock_generate_text(return_value=None)
+        ma.config.market_review_color_scheme = "red_up"
+        overview = MarketOverview(
+            date="2026-03-05",
+            indices=[
+                MarketIndex(code="000001", name="上证指数", current=3200.0, change_pct=0.68),
+                MarketIndex(code="399001", name="深证成指", current=9800.0, change_pct=-0.42),
+                MarketIndex(code="399006", name="创业板指", current=2100.0, change_pct=0.0),
+            ],
+        )
+
+        result = ma._build_indices_block(overview)
+
+        assert "| 上证指数 | 3200.00 | 🔴 +0.68% |" in result
+        assert "| 深证成指 | 9800.00 | 🟢 -0.42% |" in result
+        assert "| 创业板指 | 2100.00 | ⚪ +0.00% |" in result
+
+    def test_indices_block_keeps_green_up_default_color_scheme(self):
+        from src.market_analyzer import MarketOverview, MarketIndex
+
+        ma = self._make_market_analyzer_with_mock_generate_text(return_value=None)
+        overview = MarketOverview(
+            date="2026-03-05",
+            indices=[
+                MarketIndex(code="000001", name="上证指数", current=3200.0, change_pct=0.68),
+                MarketIndex(code="399001", name="深证成指", current=9800.0, change_pct=-0.42),
+            ],
+        )
+
+        result = ma._build_indices_block(overview)
+
+        assert "| 上证指数 | 3200.00 | 🟢 +0.68% |" in result
+        assert "| 深证成指 | 9800.00 | 🔴 -0.42% |" in result
 
     def test_no_private_attribute_access_in_market_analyzer_source(self):
         """Static guard: market_analyzer.py must not access private analyzer attrs."""

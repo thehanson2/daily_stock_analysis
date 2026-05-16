@@ -263,6 +263,18 @@ class SystemConfigService:
 
         return display_map
 
+    @staticmethod
+    def _resolve_display_value(raw_value: str, field_schema: Dict[str, Any], raw_value_exists: bool) -> str:
+        if raw_value_exists:
+            return raw_value
+
+        if field_schema.get("ui_control") == "switch":
+            default_value = field_schema.get("default_value")
+            if isinstance(default_value, str) and default_value:
+                return default_value
+
+        return raw_value
+
     def get_config(self, include_schema: bool = True, mask_token: str = "******") -> Dict[str, Any]:
         """Return current config values without server-side secret masking."""
         config_map = self._build_display_config_map(self._manager.read_config_map())
@@ -281,12 +293,14 @@ class SystemConfigService:
 
         items: List[Dict[str, Any]] = []
         for key in all_keys:
+            raw_value_exists = key in config_map
             raw_value = config_map.get(key, "")
             field_schema = schema_by_key[key]
+            display_value = self._resolve_display_value(raw_value, field_schema, raw_value_exists)
             item: Dict[str, Any] = {
                 "key": key,
-                "value": raw_value,
-                "raw_value_exists": bool(raw_value),
+                "value": display_value,
+                "raw_value_exists": raw_value_exists,
                 "is_masked": False,
             }
             if include_schema:

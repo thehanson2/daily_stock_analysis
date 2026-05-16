@@ -405,6 +405,33 @@ class AnalysisApiContractTestCase(unittest.TestCase):
         self.assertEqual(result.result.report["meta"]["current_price"], 1234.5)
         self.assertEqual(result.result.report["meta"]["change_pct"], 0.0)
 
+    def test_get_analysis_status_returns_market_review_report_from_db(self) -> None:
+        if get_analysis_status is None:
+            self.skipTest("analysis endpoint helpers unavailable in this environment")
+
+        mock_queue = MagicMock()
+        mock_queue.get_task.return_value = None
+        mock_db = MagicMock()
+        mock_db.get_analysis_history.return_value = [
+            SimpleNamespace(
+                id=10,
+                code="MARKET",
+                name="大盘复盘",
+                report_type="market_review",
+                raw_result={"raw_response": "# 🎯 大盘复盘\n\n复盘正文"},
+                news_content="复盘正文",
+                created_at=None,
+            )
+        ]
+
+        with patch("api.v1.endpoints.analysis.get_task_queue", return_value=mock_queue), \
+             patch("src.storage.DatabaseManager.get_instance", return_value=mock_db):
+            result = get_analysis_status("market-task-1")
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.market_review_report, "# 🎯 大盘复盘\n\n复盘正文")
+        self.assertIsNone(result.result)
+
     def test_get_analysis_status_completed_db_snapshot_reads_change_pct_from_raw_when_price_present(self) -> None:
         if get_analysis_status is None:
             self.skipTest("analysis endpoint helpers unavailable in this environment")

@@ -418,6 +418,7 @@ class AnalysisTaskQueue:
         stock_name: Optional[str] = None,
         report_type: str = "detailed",
         message: Optional[str] = "任务已加入队列",
+        task_id: Optional[str] = None,
     ) -> TaskInfo:
         """
         Submit a generic background callable with task lifecycle tracking.
@@ -425,7 +426,7 @@ class AnalysisTaskQueue:
         This is used by callers that need task status visibility but do not
         map to standard per-stock async analysis flow.
         """
-        task_id = uuid.uuid4().hex
+        task_id = task_id or uuid.uuid4().hex
         task_info = TaskInfo(
             task_id=task_id,
             stock_code=stock_code,
@@ -436,6 +437,8 @@ class AnalysisTaskQueue:
         )
 
         with self._data_lock:
+            if task_id in self._tasks:
+                raise ValueError(f"任务 ID 已存在: {task_id}")
             self._tasks[task_id] = task_info
             try:
                 future = self.executor.submit(self._execute_background_task, task_id, run_task)

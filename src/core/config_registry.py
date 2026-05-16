@@ -955,6 +955,20 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "validation": {},
         "display_order": 53,
     },
+    "REPORT_SHOW_LLM_MODEL": {
+        "title": "Show LLM Model in Reports",
+        "description": "Show the LLM model name in notification report footers. Disable to hide runtime model metadata. This option only affects report rendering and does not change runtime provider/model/Base URL/LiteLLM routing, migration, persistence, or cleanup behavior.",
+        "category": "notification",
+        "data_type": "boolean",
+        "ui_control": "switch",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "true",
+        "options": [],
+        "validation": {},
+        "display_order": 54,
+    },
     # ------------------------------------------------------------------
     # Notification – Feishu
     # ------------------------------------------------------------------
@@ -1824,6 +1838,23 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "options": ["cn", "hk", "us", "both"],
         "validation": {"enum": ["cn", "hk", "us", "both"]},
         "display_order": 47,
+    },
+    "MARKET_REVIEW_COLOR_SCHEME": {
+        "title": "Market Review Color Scheme",
+        "description": "Index change color style in market-review tables: green_up (green for gains, red for losses) or red_up (red for gains, green for losses).",
+        "category": "system",
+        "data_type": "string",
+        "ui_control": "select",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "green_up",
+        "options": [
+            {"label": "Green Up / Red Down", "value": "green_up"},
+            {"label": "Red Up / Green Down", "value": "red_up"},
+        ],
+        "validation": {"enum": ["green_up", "red_up"]},
+        "display_order": 48,
     },
     "MAX_WORKERS": {
         "title": "Max Workers",

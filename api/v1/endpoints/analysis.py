@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import re
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union, Dict, Any
@@ -116,6 +117,7 @@ def _run_market_review_background(
     override_region: Optional[str] = None,
     lock_token: Optional[_MarketReviewExecutionLock] = None,
     config: Optional[Config] = None,
+    query_id: Optional[str] = None,
 ) -> None:
     """Run market review after the API response has been accepted."""
     from src.core.market_review import run_market_review
@@ -123,13 +125,16 @@ def _run_market_review_background(
     runtime_config = config or get_config_dep()
     try:
         notifier, analyzer, search_service = _build_market_review_runtime(runtime_config)
-        report = run_market_review(
-            notifier=notifier,
-            analyzer=analyzer,
-            search_service=search_service,
-            send_notification=send_notification,
-            override_region=override_region,
-        )
+        review_kwargs = {
+            "notifier": notifier,
+            "analyzer": analyzer,
+            "search_service": search_service,
+            "send_notification": send_notification,
+            "override_region": override_region,
+        }
+        if query_id:
+            review_kwargs["query_id"] = query_id
+        report = run_market_review(**review_kwargs)
         if not report:
             raise RuntimeError("大盘复盘未返回可持久化报告")
         return {"result": report}
@@ -500,16 +505,19 @@ def trigger_market_review(
         )
 
     try:
+        task_id = uuid.uuid4().hex
         task = get_task_queue().submit_background_task(
             lambda: _run_market_review_background(
                 request.send_notification,
                 override_region=override_region,
                 lock_token=lock_token,
                 config=config,
+                query_id=task_id,
             ),
             stock_code="market_review",
             stock_name="大盘复盘",
             message="大盘复盘任务已提交",
+            task_id=task_id,
         )
     except Exception:
         _release_market_review_lock(lock_token)
@@ -751,6 +759,25 @@ def get_analysis_status(task_id: str) -> TaskStatus:
         if records:
             record = records[0]
             raw_result = parse_json_field(record.raw_result)
+            if getattr(record, "report_type", None) == "market_review":
+                market_review_report = None
+                if isinstance(raw_result, dict):
+                    report_text = raw_result.get("raw_response") or raw_result.get("market_review_report")
+                    if isinstance(report_text, str) and report_text.strip():
+                        market_review_report = report_text
+                if not market_review_report and record.news_content:
+                    market_review_report = record.news_content
+
+                return TaskStatus(
+                    task_id=task_id,
+                    status="completed",
+                    progress=100,
+                    result=None,
+                    market_review_report=market_review_report,
+                    error=None,
+                    stock_name=record.name,
+                )
+
             model_used = normalize_model_used(
                 (raw_result or {}).get("model_used") if isinstance(raw_result, dict) else None
             )
