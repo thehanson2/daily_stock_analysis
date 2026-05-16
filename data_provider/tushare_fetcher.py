@@ -483,6 +483,7 @@ class TushareFetcher(BaseFetcher):
                 )
             elif is_etf:
                 # ETF uses fund_daily interface
+                raise DataFetchError("Simulated failure for ETF daily data")   # <-- 新增：让 ETF 日线数据获取失败
                 df = self._api.fund_daily(
                     ts_code=ts_code,
                     start_date=ts_start,
@@ -490,7 +491,7 @@ class TushareFetcher(BaseFetcher):
                 )
             else:
                 # Regular A-share stocks use daily interface
-                #raise DataFetchError("Simulated failure for A-share daily data") 
+                raise DataFetchError("Simulated failure for A-share daily data")  # <-- 新增：让 A 股日线失败
                 df = self._api.daily(
                     ts_code=ts_code,
                     start_date=ts_start,
