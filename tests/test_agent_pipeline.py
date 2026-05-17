@@ -1688,6 +1688,172 @@ class TestAgentConstructionChain(unittest.TestCase):
         self.assertEqual(mock_completion.call_args.kwargs["temperature"], 0.6)
 
     @patch("src.agent.llm_adapter.Router")
+    def test_llm_adapter_omits_temperature_for_gpt5_family(self, _mock_router):
+        """Agent direct LiteLLM calls should omit temperature for strict default-temperature models."""
+        mock_cfg = SimpleNamespace(
+            agent_litellm_model="",
+            litellm_model="openai/gpt5.5-ferr",
+            litellm_fallback_models=[],
+            llm_model_list=[],
+            llm_temperature=0.2,
+            gemini_api_keys=[],
+            anthropic_api_keys=[],
+            openai_api_keys=[],
+            deepseek_api_keys=[],
+            openai_base_url=None,
+        )
+
+        from src.agent.llm_adapter import LLMToolAdapter
+        adapter = LLMToolAdapter(config=mock_cfg)
+        adapter._router = None
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="agent ok",
+                        tool_calls=[],
+                    )
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3),
+        )
+
+        with patch("src.agent.llm_adapter.litellm.completion", return_value=response) as mock_completion:
+            result = adapter._call_litellm_model(
+                [{"role": "user", "content": "hi"}],
+                [],
+                "openai/gpt5.5-ferr",
+                temperature=0.2,
+            )
+
+        self.assertEqual(result.content, "agent ok")
+        self.assertNotIn("temperature", mock_completion.call_args.kwargs)
+
+    @patch("src.agent.llm_adapter.Router")
+    def test_llm_adapter_recovers_from_unsupported_temperature(self, _mock_router):
+        """Agent direct LiteLLM calls should retry once with a request-scoped parameter repair."""
+        from src.llm.generation_params import clear_litellm_generation_param_recovery_cache
+
+        clear_litellm_generation_param_recovery_cache()
+        mock_cfg = SimpleNamespace(
+            agent_litellm_model="",
+            litellm_model="openai/custom-temp-locked-agent",
+            litellm_fallback_models=[],
+            llm_model_list=[],
+            llm_temperature=0.2,
+            gemini_api_keys=[],
+            anthropic_api_keys=[],
+            openai_api_keys=[],
+            deepseek_api_keys=[],
+            openai_base_url=None,
+        )
+
+        from src.agent.llm_adapter import LLMToolAdapter
+        adapter = LLMToolAdapter(config=mock_cfg)
+        adapter._router = None
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="agent ok",
+                        tool_calls=[],
+                    )
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3),
+        )
+
+        with patch("src.agent.llm_adapter.litellm.completion") as mock_completion:
+            mock_completion.side_effect = [
+                RuntimeError("Unsupported parameter: temperature is not supported"),
+                response,
+            ]
+            result = adapter._call_litellm_model(
+                [{"role": "user", "content": "hi"}],
+                [],
+                "openai/custom-temp-locked-agent",
+                temperature=0.2,
+            )
+
+        self.assertEqual(result.content, "agent ok")
+        self.assertEqual(mock_completion.call_args_list[0].kwargs["temperature"], 0.2)
+        self.assertNotIn("temperature", mock_completion.call_args_list[1].kwargs)
+
+    @patch("src.agent.llm_adapter.Router")
+    def test_llm_adapter_legacy_router_recovery_cache_is_scoped_to_endpoint(self, mock_router):
+        """Legacy multi-key Router recoveries should not leak across base URLs."""
+        from src.llm.generation_params import clear_litellm_generation_param_recovery_cache
+
+        clear_litellm_generation_param_recovery_cache()
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="agent ok",
+                        tool_calls=[],
+                    )
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3),
+        )
+        strict_router = MagicMock()
+        flex_router = MagicMock()
+        strict_router.completion.side_effect = [
+            RuntimeError("Unsupported parameter: temperature is not supported"),
+            response,
+        ]
+        flex_router.completion.return_value = response
+        mock_router.side_effect = [strict_router, flex_router]
+
+        strict_cfg = SimpleNamespace(
+            agent_litellm_model="",
+            litellm_model="openai/shared-model",
+            litellm_fallback_models=[],
+            llm_model_list=[],
+            llm_temperature=0.2,
+            gemini_api_keys=[],
+            anthropic_api_keys=[],
+            openai_api_keys=["sk-strict-key-1", "sk-strict-key-2"],
+            deepseek_api_keys=[],
+            openai_base_url="https://strict.example/v1",
+        )
+        flex_cfg = SimpleNamespace(
+            agent_litellm_model="",
+            litellm_model="openai/shared-model",
+            litellm_fallback_models=[],
+            llm_model_list=[],
+            llm_temperature=0.2,
+            gemini_api_keys=[],
+            anthropic_api_keys=[],
+            openai_api_keys=["sk-flex-key-1", "sk-flex-key-2"],
+            deepseek_api_keys=[],
+            openai_base_url="https://flex.example/v1",
+        )
+
+        from src.agent.llm_adapter import LLMToolAdapter
+
+        strict_adapter = LLMToolAdapter(config=strict_cfg)
+        strict_result = strict_adapter._call_litellm_model(
+            [{"role": "user", "content": "hi"}],
+            [],
+            "openai/shared-model",
+            temperature=0.2,
+        )
+        flex_adapter = LLMToolAdapter(config=flex_cfg)
+        flex_result = flex_adapter._call_litellm_model(
+            [{"role": "user", "content": "hi"}],
+            [],
+            "openai/shared-model",
+            temperature=0.2,
+        )
+
+        self.assertEqual(strict_result.content, "agent ok")
+        self.assertEqual(flex_result.content, "agent ok")
+        self.assertEqual(strict_router.completion.call_args_list[0].kwargs["temperature"], 0.2)
+        self.assertNotIn("temperature", strict_router.completion.call_args_list[1].kwargs)
+        self.assertEqual(flex_router.completion.call_args.kwargs["temperature"], 0.2)
+
+    @patch("src.agent.llm_adapter.Router")
     def test_llm_adapter_fallback_does_not_leak_kimi_fixed_temperature(self, _mock_router):
         """Non-Kimi fallbacks should keep the requested temperature after a Kimi failure."""
         mock_cfg = SimpleNamespace(

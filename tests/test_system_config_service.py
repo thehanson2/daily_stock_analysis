@@ -1457,6 +1457,44 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertEqual(current_map["LITELLM_MODEL"], "openai/kimi-k2.6")
         self.assertEqual(current_map["LLM_TEMPERATURE"], "0.42")
 
+    def test_update_runtime_model_cleanup_does_not_rewrite_temperature(self) -> None:
+        self._rewrite_env(
+            "STOCK_LIST=600519,000001",
+            "LLM_CHANNELS=deepseek",
+            "LLM_DEEPSEEK_PROTOCOL=deepseek",
+            "LLM_DEEPSEEK_BASE_URL=https://api.deepseek.com",
+            "LLM_DEEPSEEK_API_KEY=sk-test-value",
+            "LLM_DEEPSEEK_MODELS=deepseek-chat,deepseek-v4-flash",
+            "LITELLM_MODEL=deepseek/deepseek-chat",
+            "AGENT_LITELLM_MODEL=deepseek/deepseek-v4-flash",
+            "LLM_TEMPERATURE=0.42",
+            "LITELLM_FALLBACK_MODELS=deepseek/deepseek-v4-flash,cohere/command-r-plus",
+            "VISION_MODEL=deepseek/deepseek-chat",
+        )
+
+        response = self.service.update(
+            config_version=self.manager.get_config_version(),
+            items=[
+                {"key": "LLM_DEEPSEEK_MODELS", "value": "deepseek-v4-flash"},
+                {"key": "LITELLM_MODEL", "value": ""},
+                {"key": "AGENT_LITELLM_MODEL", "value": ""},
+                {"key": "LITELLM_FALLBACK_MODELS", "value": "deepseek/deepseek-v4-flash"},
+                {"key": "VISION_MODEL", "value": ""},
+            ],
+            reload_now=False,
+        )
+
+        self.assertTrue(response["success"])
+        current_map = self.manager.read_config_map()
+        self.assertEqual(current_map["LLM_TEMPERATURE"], "0.42")
+        self.assertEqual(current_map["LITELLM_MODEL"], "")
+        self.assertEqual(current_map["AGENT_LITELLM_MODEL"], "")
+        self.assertEqual(current_map["VISION_MODEL"], "")
+        self.assertEqual(
+            current_map["LITELLM_FALLBACK_MODELS"],
+            "deepseek/deepseek-v4-flash",
+        )
+
     @patch("litellm.completion")
     def test_test_llm_channel_does_not_persist_normalized_kimi_temperature(self, mock_completion) -> None:
         self._rewrite_env("LLM_TEMPERATURE=0.42")
@@ -1479,6 +1517,62 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertTrue(payload["success"])
         self.assertEqual(mock_completion.call_args.kwargs["temperature"], 1.0)
         self.assertEqual(self.manager.read_config_map()["LLM_TEMPERATURE"], "0.42")
+
+    @patch("litellm.completion")
+    def test_test_llm_channel_omits_temperature_for_gpt5_family(self, mock_completion) -> None:
+        mock_completion.return_value = type(
+            "MockResponse",
+            (),
+            {
+                "choices": [type("Choice", (), {"message": type("Message", (), {"content": "OK"})()})()],
+            },
+        )()
+
+        payload = self.service.test_llm_channel(
+            name="primary",
+            protocol="openai",
+            base_url="https://api.example.com/v1",
+            api_key="sk-test-value",
+            models=["gpt5.5-ferr"],
+        )
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["resolved_model"], "openai/gpt5.5-ferr")
+        self.assertNotIn("temperature", mock_completion.call_args.kwargs)
+
+    @patch("litellm.completion")
+    @patch("src.services.system_config_service.Config._load_from_env")
+    def test_test_llm_channel_recovers_from_unsupported_temperature(
+        self,
+        mock_load_config,
+        mock_completion,
+    ) -> None:
+        from src.llm.generation_params import clear_litellm_generation_param_recovery_cache
+
+        clear_litellm_generation_param_recovery_cache()
+        mock_load_config.return_value = SimpleNamespace(llm_temperature=0.42)
+        mock_completion.side_effect = [
+            RuntimeError("Unsupported parameter: temperature is not supported"),
+            type(
+                "MockResponse",
+                (),
+                {
+                    "choices": [type("Choice", (), {"message": type("Message", (), {"content": "OK"})()})()],
+                },
+            )(),
+        ]
+
+        payload = self.service.test_llm_channel(
+            name="primary",
+            protocol="openai",
+            base_url="https://api.example.com/v1",
+            api_key="sk-test-value",
+            models=["custom-temp-locked-settings"],
+        )
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(mock_completion.call_args_list[0].kwargs["temperature"], 0.42)
+        self.assertNotIn("temperature", mock_completion.call_args_list[1].kwargs)
 
     @patch("litellm.completion")
     @patch("src.services.system_config_service.Config._load_from_env")
