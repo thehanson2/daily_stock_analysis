@@ -1,13 +1,13 @@
 # 实时告警中心
 
-本文档记录 Issue #1202 P0 的告警中心基线、数据契约、存储评估和兼容边界。P0 只定义后续实现可以复用的契约，不新增 API、Web 页面、数据库表、触发历史写入、冷却执行或规则迁移。
+本文档记录 Issue #1202 告警中心的运行基线、数据契约、分阶段实现范围和兼容边界。
 
 ## 当前基线
 
-当前运行时告警由 `src/agent/events.py` 中的 `EventMonitor` 提供，并通过 schedule 模式后台轮询执行。
+当前运行时告警由 `src/services/alert_worker.py` 中的后台 worker 统一调度，底层规则评估复用 `src/services/alert_service.py` 与 `src/agent/events.py` 中的 EventMonitor 规则模型。
 
 - 配置入口：`AGENT_EVENT_MONITOR_ENABLED`、`AGENT_EVENT_MONITOR_INTERVAL_MINUTES`、`AGENT_EVENT_ALERT_RULES_JSON`。
-- 运行入口：`main.py` 在 schedule 模式中调用 `build_event_monitor_from_config()`，并注册 `agent_event_monitor` 后台任务。
+- 运行入口：`main.py` 在 schedule 模式中注册 `agent_event_monitor` 后台任务；后台 worker 每轮读取持久化 active rules，并继续兼容 legacy `AGENT_EVENT_ALERT_RULES_JSON`。
 - 通知投递：触发后复用 `NotificationService.send(..., route_type="alert")`，继续遵守通知网关的 alert 路由配置。
 - Web/System 配置校验：`src/services/system_config_service.py` 会对 `AGENT_EVENT_ALERT_RULES_JSON` 做 JSON 与规则语义校验。
 
@@ -23,12 +23,12 @@
 
 ## Legacy 配置兼容
 
-P0 保留 `AGENT_EVENT_ALERT_RULES_JSON` 作为唯一运行时规则来源，不自动迁移、删除、覆盖或改写用户已有 `.env` / Web 配置。
+`AGENT_EVENT_ALERT_RULES_JSON` 作为 legacy 运行时规则来源继续保留，不自动迁移、删除、覆盖或改写用户已有 `.env` / Web 配置。
 
-- 空字符串或空数组表示未配置规则；启用 EventMonitor 但没有有效规则时，schedule 模式不会注册后台告警任务。
+- 空字符串或空数组表示未配置 legacy 规则；schedule 模式仍会注册后台 worker，以便后续 API 创建的持久化 active rules 无需重启即可被评估。
 - Web/System 配置保存时执行严格校验，JSON 无效、字段缺失、方向非法、阈值非法或 unsupported rule type 都应返回配置错误。
 - 运行时加载时允许跳过单条无效规则，剩余有效规则继续工作，避免单条配置破坏整个 schedule 进程。
-- 当前规则触发后会在进程内标记为 `triggered`，这不是告警中心冷却模型，也不提供跨进程或重启后的触发历史。
+- 当前 worker 使用进程内 fingerprint 避免持续触发条件重复推送；这不是告警中心冷却模型，也不提供跨进程或重启后的冷却状态。
 
 ## 数据契约
 
@@ -150,6 +150,25 @@ P1 不做：
 - 不让 schedule worker 加载持久化 active rules，也不实现持久化规则与 legacy JSON 的合并/去重。
 - 不实现真实 `alert_trigger` / `alert_notification` 写入；P1 只提供查询接口和表结构。
 - 不实现 `alert_cooldown` 执行语义。
+- 不实现 MACD、KDJ、CCI、RSI、持仓风险或 Market Light 告警规则。
+
+## P2 告警评估 Worker
+
+P2 将 schedule 运行时从启动时一次性构建 legacy `EventMonitor`，切换为每轮后台 worker 评估持久化 active rules 与 legacy JSON 规则。
+
+- `AGENT_EVENT_MONITOR_ENABLED` 继续作为总开关，后台任务名保持 `agent_event_monitor`。
+- worker 每轮读取 DB 中 `enabled=true` 的 `alert_rules`，并重新解析 `AGENT_EVENT_ALERT_RULES_JSON`；新增 API 规则不需要重启 schedule 进程。
+- DB 规则与 legacy 规则按 `target_scope + target + alert_type + canonical(parameters)` 去重，冲突时 DB 规则优先；legacy 配置不自动迁移、删除或改写。
+- 每条规则独立评估，单条失败只写 `failed` 评估状态，不影响同轮其他规则或主分析流程。
+- `alert_triggers` 在 P2 用于记录最小评估历史：`triggered`、`skipped`、`degraded`、`failed`；正常 `not_triggered` 不写历史，避免轮询刷表。
+- 实时行情缺失、字段缺失或非可评估场景记录 `skipped`；日线数据不可用或结构不完整记录 `degraded`；诊断信息会脱敏。
+- 触发后仍调用 `NotificationService.send(..., route_type="alert")`；进程内 fingerprint 只避免持续触发条件重复推送，不执行 `cooldown_policy`。
+
+P2 不做：
+
+- 不新增 Web 告警中心页面、路由或侧边栏入口。
+- 不写 `alert_notifications`，不记录 per-channel notification attempt。
+- 不实现 `alert_cooldown`、`cooldown_policy` 或 `notification_policy` 执行语义。
 - 不实现 MACD、KDJ、CCI、RSI、持仓风险或 Market Light 告警规则。
 
 ## Phase 边界

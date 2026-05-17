@@ -5,11 +5,14 @@ Ensures every notification channel that has a sender implementation also
 has its config keys registered in _FIELD_DEFINITIONS so the Web settings
 page and /api/v1/system/config/schema can expose them.
 """
+import re
 import unittest
+from pathlib import Path
 
 from src.core.config_registry import (
     build_schema_response,
     get_field_definition,
+    get_registered_field_keys,
 )
 
 
@@ -146,7 +149,7 @@ class TestAstrBotFieldsRegistered(unittest.TestCase):
 
 
 class TestSettingsHelpMetadata(unittest.TestCase):
-    """Field help metadata should be available for the first settings help slice."""
+    """Field help metadata should be available for covered settings help slices."""
 
     _HELP_KEYS = (
         "STOCK_LIST",
@@ -154,6 +157,16 @@ class TestSettingsHelpMetadata(unittest.TestCase):
         "LLM_CHANNELS",
         "FEISHU_WEBHOOK_URL",
         "WEBUI_HOST",
+        "AGENT_LITELLM_MODEL",
+        "LITELLM_FALLBACK_MODELS",
+        "TUSHARE_TOKEN",
+        "REALTIME_SOURCE_PRIORITY",
+        "TAVILY_API_KEYS",
+        "NEWS_STRATEGY_PROFILE",
+        "WECHAT_WEBHOOK_URL",
+        "EMAIL_RECEIVERS",
+        "SCHEDULE_TIME",
+        "ADMIN_AUTH_ENABLED",
     )
 
     def test_representative_fields_have_help_metadata(self):
@@ -168,6 +181,21 @@ class TestSettingsHelpMetadata(unittest.TestCase):
         self.assertEqual(field["category"], "system")
         self.assertNotEqual(field["display_order"], 9000)
 
+    def test_restart_warning_codes_match_runtime_behavior(self):
+        restart_required_keys = (
+            "RUN_IMMEDIATELY",
+            "SCHEDULE_ENABLED",
+            "SCHEDULE_RUN_IMMEDIATELY",
+            "WEBUI_HOST",
+            "WEBUI_PORT",
+        )
+        for key in restart_required_keys:
+            field = get_field_definition(key)
+            self.assertIn("restart_required", field.get("warning_codes", []))
+
+        schedule_time = get_field_definition("SCHEDULE_TIME")
+        self.assertNotIn("restart_required", schedule_time.get("warning_codes", []))
+
     def test_schema_response_includes_help_metadata(self):
         schema = build_schema_response()
         fields = {
@@ -178,6 +206,54 @@ class TestSettingsHelpMetadata(unittest.TestCase):
 
         self.assertEqual(fields["STOCK_LIST"]["help_key"], "settings.base.STOCK_LIST")
         self.assertIn("docs/full-guide.md", fields["STOCK_LIST"]["docs"][0]["href"])
+
+    def test_admin_auth_help_is_read_only_in_generic_settings(self):
+        field = get_field_definition("ADMIN_AUTH_ENABLED")
+        self.assertFalse(field["is_editable"])
+        self.assertIn("auth_settings_endpoint_required", field.get("warning_codes", []))
+
+
+class TestSettingsHelpContract(unittest.TestCase):
+    """Help keys must map to registry metadata or be editor-only.
+
+    The LLM Channel editor uses internal field-level keys prefixed with
+    ``settings.llm_channel.``. Those keys are valid for UI only and should not be
+    expected in the backend registry.
+    """
+
+    _LLM_CHANNEL_HELP_PREFIX = "settings.llm_channel."
+    _SETTINGS_HELP_FILE = Path(__file__).resolve().parents[1] / "apps/dsa-web/src/locales/settingsHelp.ts"
+
+    @classmethod
+    def _collect_registry_help_keys(cls) -> set[str]:
+        keys = set()
+        for key in get_registered_field_keys():
+            definition = get_field_definition(key)
+            help_key = definition.get("help_key")
+            if help_key:
+                keys.add(help_key)
+        return keys
+
+    @classmethod
+    def _collect_locale_help_keys(cls) -> set[str]:
+        content = cls._SETTINGS_HELP_FILE.read_text(encoding="utf-8")
+        return set(re.findall(r"^\s*'([^']+)'\s*:\s*\{", content, flags=re.MULTILINE))
+
+    def test_registry_help_keys_exist_in_locales(self) -> None:
+        locale_keys = self._collect_locale_help_keys()
+        registry_help_keys = self._collect_registry_help_keys()
+        missing = sorted(registry_help_keys - locale_keys)
+        self.assertEqual(missing, [], f"Registry help keys missing locale: {missing}")
+
+    def test_locale_help_keys_are_registry_or_llm_channel_internal(self) -> None:
+        registry_help_keys = self._collect_registry_help_keys()
+        locale_keys = self._collect_locale_help_keys()
+        external_keys = sorted(
+            key
+            for key in locale_keys
+            if key not in registry_help_keys and not key.startswith(self._LLM_CHANNEL_HELP_PREFIX)
+        )
+        self.assertEqual(external_keys, [], f"Unexpected locale-only help keys: {external_keys}")
 
 
 class TestSensitiveFieldsUsePasswordControl(unittest.TestCase):

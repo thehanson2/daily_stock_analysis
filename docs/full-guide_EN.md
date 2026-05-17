@@ -1152,10 +1152,10 @@ A: Check if Actions is enabled, and if cron expression is correct (note it's UTC
 
 ## Agent Event Monitor
 
-When `AGENT_EVENT_MONITOR_ENABLED=true`, schedule mode polls the rules in `AGENT_EVENT_ALERT_RULES_JSON` every `AGENT_EVENT_MONITOR_INTERVAL_MINUTES` minutes and sends triggered alerts through the existing notification channels. The runtime currently supports three rule types:
+When `AGENT_EVENT_MONITOR_ENABLED=true`, schedule mode runs the alert worker every `AGENT_EVENT_MONITOR_INTERVAL_MINUTES` minutes. The worker reads enabled rules created through the Alert API and continues to support legacy rules in `AGENT_EVENT_ALERT_RULES_JSON`; triggered alerts still go through the existing notification channels. The runtime currently supports three rule types:
 
 > Compatibility and rollback note: this section documents current Event Monitor rule behavior (including `price_change_percent`) and does not change external model/provider API semantics such as model names, providers, Base URL, LiteLLM, `OPENAI_*`, `DEEPSEEK_*`, or `GEMINI_*` configuration.
-> Rollback is explicit: clear or disable `AGENT_EVENT_MONITOR_ENABLED`/related rule config to restore previous behavior.
+> Legacy JSON is not automatically migrated, deleted, or rewritten. To roll back the background alert worker, clear or disable `AGENT_EVENT_MONITOR_ENABLED`/related rule config.
 
 | `alert_type` | Direction | Threshold | Description |
 | --- | --- | --- | --- |
@@ -1170,6 +1170,8 @@ AGENT_EVENT_MONITOR_ENABLED=true
 AGENT_EVENT_MONITOR_INTERVAL_MINUTES=5
 AGENT_EVENT_ALERT_RULES_JSON=[{"stock_code":"600519","alert_type":"price_cross","direction":"above","price":1800},{"stock_code":"300750","alert_type":"price_change_percent","direction":"down","change_pct":3.0},{"stock_code":"000858","alert_type":"volume_spike","multiplier":2.5}]
 ```
+
+The P2 worker writes `triggered`, `skipped`, `degraded`, and `failed` rows to `alert_triggers` as minimal evaluation history; normal non-triggered checks do not write history. P2 does not write `alert_notifications` and does not execute `cooldown_policy` / `notification_policy`.
 
 ---
 

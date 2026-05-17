@@ -92,6 +92,30 @@ class AlertRepository:
             ).scalars().all()
             return list(rows), int(total)
 
+    def list_enabled_rules(self, *, limit: int = 1000) -> List[AlertRuleRecord]:
+        safe_limit = max(1, min(int(limit), 1000))
+        with self.db.get_session() as session:
+            rows = session.execute(
+                select(AlertRuleRecord)
+                .where(AlertRuleRecord.enabled.is_(True))
+                .order_by(desc(AlertRuleRecord.updated_at), desc(AlertRuleRecord.id))
+                .limit(safe_limit)
+            ).scalars().all()
+            return list(rows)
+
+    def create_trigger(self, fields: Dict[str, Any]) -> AlertTriggerRecord:
+        if not fields.get("target"):
+            raise ValueError("alert trigger target is required")
+        if not fields.get("status"):
+            raise ValueError("alert trigger status is required")
+
+        with self.db.get_session() as session:
+            row = AlertTriggerRecord(**fields)
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return row
+
     def list_triggers(
         self,
         *,
