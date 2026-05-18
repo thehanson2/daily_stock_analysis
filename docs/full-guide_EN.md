@@ -1179,9 +1179,9 @@ AGENT_EVENT_MONITOR_INTERVAL_MINUTES=5
 AGENT_EVENT_ALERT_RULES_JSON=[{"stock_code":"600519","alert_type":"price_cross","direction":"above","price":1800},{"stock_code":"300750","alert_type":"price_change_percent","direction":"down","change_pct":3.0},{"stock_code":"000858","alert_type":"volume_spike","multiplier":2.5}]
 ```
 
-The P2 worker writes `triggered`, `skipped`, `degraded`, and `failed` rows to `alert_triggers` as minimal evaluation history; normal non-triggered checks do not write history. P2 does not write `alert_notifications` and does not execute `cooldown_policy` / `notification_policy`.
+The worker writes `triggered`, `skipped`, `degraded`, and `failed` rows to `alert_triggers` as evaluation history; normal non-triggered checks do not write history. Real triggers write per-channel attempts to `alert_notifications`, and Alert API persisted rules write business cooldown state to `alert_cooldowns`; if the persisted cooldown read fails, the worker temporarily falls back to the in-process fingerprint guard to avoid repeated notifications during the DB failure. Legacy `AGENT_EVENT_ALERT_RULES_JSON` rules continue to use the in-process fingerprint suppressor and do not write persisted cooldown state; the notification infrastructure `notification_noise.py` guard remains independent. The Web rule list uses the backend-provided `cooldown_active` flag instead of browser-local timezone parsing to decide whether a rule is cooling down.
 
-The WebUI "Alerts" page can manage the current three persisted rule types, run one-shot dry-run tests, and view trigger history. See [Real-Time Alert Center](alerts.md) for detailed boundaries.
+The WebUI "Alerts" page can manage the current three persisted rule types, run one-shot dry-run tests, and view trigger history, notification attempts, and read-only cooldown state. See [Real-Time Alert Center](alerts.md) for detailed boundaries.
 
 ---
 

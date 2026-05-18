@@ -1317,9 +1317,9 @@ AGENT_EVENT_MONITOR_INTERVAL_MINUTES=5
 AGENT_EVENT_ALERT_RULES_JSON=[{"stock_code":"600519","alert_type":"price_cross","direction":"above","price":1800},{"stock_code":"300750","alert_type":"price_change_percent","direction":"down","change_pct":3.0},{"stock_code":"000858","alert_type":"volume_spike","multiplier":2.5}]
 ```
 
-P2 worker 会把 `triggered`、`skipped`、`degraded`、`failed` 写入 `alert_triggers` 作为最小评估历史；正常未触发不写历史。P2 不写 `alert_notifications`，也不执行 `cooldown_policy` / `notification_policy`。
+worker 会把 `triggered`、`skipped`、`degraded`、`failed` 写入 `alert_triggers` 作为评估历史；正常未触发不写历史。真实触发后会把每个通知渠道的 attempt 写入 `alert_notifications`，并为 Alert API 创建的持久化规则写入 `alert_cooldowns` 业务冷却状态；若读取持久化冷却失败，worker 会临时使用进程内 fingerprint 防止 DB 异常期间重复推送。legacy `AGENT_EVENT_ALERT_RULES_JSON` 规则继续使用进程内 fingerprint 抑制，不写持久化冷却；通知基础设施的 `notification_noise.py` 降噪仍独立生效。Web 规则列表使用后端返回的 `cooldown_active` 判断冷却状态，避免浏览器本地时区解析影响展示。
 
-WebUI 的“告警”页面可以管理当前三类持久化规则、执行一次性 dry-run 测试并查看触发历史；详细边界见 [实时告警中心](alerts.md)。
+WebUI 的“告警”页面可以管理当前三类持久化规则、执行一次性 dry-run 测试，并查看触发历史、通知尝试结果和只读冷却状态；详细边界见 [实时告警中心](alerts.md)。
 
 ## 持仓管理说明
 

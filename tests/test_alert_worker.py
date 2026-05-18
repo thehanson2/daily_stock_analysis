@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 
 from src.config import Config
+from src.notification import ChannelAttemptResult, NotificationDispatchResult
 from src.services.alert_service import AlertService
 from src.services.alert_worker import AlertWorker
 from src.storage import DatabaseManager
@@ -70,6 +71,47 @@ class AlertWorkerTestCase(unittest.TestCase):
     def _triggers(self, **filters) -> list[dict]:
         return self.service.list_triggers(page_size=100, **filters)["items"]
 
+    def _notifications(self, **filters) -> list[dict]:
+        return self.service.list_notifications(page_size=100, **filters)["items"]
+
+    def _dispatch_result(
+        self,
+        success: bool = True,
+        *,
+        dispatched: bool = True,
+        status: str | None = None,
+        channel: str = "custom",
+        error_code: str | None = None,
+    ) -> NotificationDispatchResult:
+        if status is None:
+            status = "sent" if success else "all_failed"
+        channel_results = []
+        if dispatched:
+            channel_results.append(
+                ChannelAttemptResult(
+                    channel=channel,
+                    success=success,
+                    error_code=error_code if error_code is not None else (None if success else "send_failed"),
+                    retryable=not success,
+                )
+            )
+        return NotificationDispatchResult(
+            dispatched=dispatched,
+            success=success,
+            status=status,
+            channel_results=channel_results,
+        )
+
+    def _notifier(self, *results) -> MagicMock:
+        notifier = MagicMock()
+        if not results:
+            results = (self._dispatch_result(True),)
+        if len(results) == 1:
+            notifier.send_with_results.return_value = results[0]
+        else:
+            notifier.send_with_results.side_effect = list(results)
+        return notifier
+
     def test_enabled_db_rule_triggers_and_disabled_rule_is_ignored(self) -> None:
         enabled_rule = self._create_rule(target="600519")
         self._create_rule(
@@ -78,8 +120,7 @@ class AlertWorkerTestCase(unittest.TestCase):
             parameters={"direction": "above", "price": 10},
             enabled=False,
         )
-        notifier = MagicMock()
-        notifier.send.return_value = True
+        notifier = self._notifier()
         seen_codes = []
 
         async def _quote(_monitor, stock_code):
@@ -99,8 +140,12 @@ class AlertWorkerTestCase(unittest.TestCase):
         self.assertEqual(triggers[0]["target"], "600519")
         self.assertEqual(triggers[0]["observed_value"], 1810.0)
         self.assertEqual(triggers[0]["threshold"], 1800.0)
-        notifier.send.assert_called_once()
-        self.assertEqual(notifier.send.call_args.kwargs["route_type"], "alert")
+        notifier.send_with_results.assert_called_once()
+        self.assertEqual(notifier.send_with_results.call_args.kwargs["route_type"], "alert")
+        notifications = self._notifications(trigger_id=triggers[0]["id"])
+        self.assertEqual(len(notifications), 1)
+        self.assertEqual(notifications[0]["channel"], "custom")
+        self.assertTrue(notifications[0]["success"])
 
     def test_legacy_rules_coexist_with_db_rules_and_db_rule_wins_duplicate_key(self) -> None:
         self._create_rule(target="600519")
@@ -117,7 +162,7 @@ class AlertWorkerTestCase(unittest.TestCase):
         worker = AlertWorker(
             config_provider=lambda: self._config(legacy_rules),
             service=self.service,
-            notifier=MagicMock(send=MagicMock(return_value=True)),
+            notifier=self._notifier(),
         )
         with patch("src.agent.events.EventMonitor._get_realtime_quote", new=_quote):
             stats = worker.run_once()
@@ -130,8 +175,7 @@ class AlertWorkerTestCase(unittest.TestCase):
     def test_legacy_json_parse_failure_does_not_crash_or_block_persisted_rules(self) -> None:
         before = self.env_path.read_text(encoding="utf-8")
         self._create_rule(target="600519")
-        notifier = MagicMock()
-        notifier.send.return_value = True
+        notifier = self._notifier()
         worker = AlertWorker(config_provider=lambda: self._config("[invalid"), service=self.service, notifier=notifier)
 
         with patch(
@@ -169,8 +213,7 @@ class AlertWorkerTestCase(unittest.TestCase):
 
     def test_missing_quote_writes_skipped_trigger_without_notification(self) -> None:
         self._create_rule(target="600519")
-        notifier = MagicMock()
-        notifier.send.return_value = True
+        notifier = self._notifier()
         worker = AlertWorker(config_provider=lambda: self._config(), service=self.service, notifier=notifier)
 
         with patch("src.agent.events.EventMonitor._get_realtime_quote", new=AsyncMock(return_value=None)):
@@ -181,12 +224,11 @@ class AlertWorkerTestCase(unittest.TestCase):
         self.assertEqual(len(triggers), 1)
         self.assertEqual(triggers[0]["target"], "600519")
         self.assertIn("No realtime quote", triggers[0]["diagnostics"])
-        notifier.send.assert_not_called()
+        notifier.send_with_results.assert_not_called()
 
     def test_price_cross_numeric_yyyymmdd_quote_date_writes_correct_timestamp(self) -> None:
         rule = self._create_rule(target="600519")
-        notifier = MagicMock()
-        notifier.send.return_value = True
+        notifier = self._notifier()
         worker = AlertWorker(config_provider=lambda: self._config(), service=self.service, notifier=notifier)
 
         with patch(
@@ -202,8 +244,7 @@ class AlertWorkerTestCase(unittest.TestCase):
 
     def test_price_cross_space_separated_quote_time_writes_timestamp(self) -> None:
         rule = self._create_rule(target="600519")
-        notifier = MagicMock()
-        notifier.send.return_value = True
+        notifier = self._notifier()
         worker = AlertWorker(config_provider=lambda: self._config(), service=self.service, notifier=notifier)
 
         with patch(
@@ -219,8 +260,7 @@ class AlertWorkerTestCase(unittest.TestCase):
 
     def test_ambiguous_numeric_quote_timestamp_is_not_written_as_epoch(self) -> None:
         rule = self._create_rule(target="600519")
-        notifier = MagicMock()
-        notifier.send.return_value = True
+        notifier = self._notifier()
         worker = AlertWorker(config_provider=lambda: self._config(), service=self.service, notifier=notifier)
 
         with patch(
@@ -312,8 +352,7 @@ class AlertWorkerTestCase(unittest.TestCase):
             }
         )
         manager.get_daily_data.return_value = (daily, "test_source")
-        notifier = MagicMock()
-        notifier.send.return_value = True
+        notifier = self._notifier()
 
         async def _run_inline(func, *args, **kwargs):
             return func(*args, **kwargs)
@@ -333,7 +372,7 @@ class AlertWorkerTestCase(unittest.TestCase):
         self.assertAlmostEqual(triggers[0]["threshold"], 4666.666666666667)
         self.assertEqual(triggers[0]["data_source"], "daily_data")
         self.assertEqual(triggers[0]["data_timestamp"], "2026-05-15T00:00:00")
-        notifier.send.assert_called_once()
+        notifier.send_with_results.assert_called_once()
 
     def test_single_rule_failure_does_not_block_other_rules(self) -> None:
         self._create_rule(target="600519")
@@ -343,8 +382,7 @@ class AlertWorkerTestCase(unittest.TestCase):
             alert_type="price_change_percent",
             parameters={"direction": "down", "change_pct": 3.0},
         )
-        notifier = MagicMock()
-        notifier.send.return_value = True
+        notifier = self._notifier()
 
         async def _quote(_monitor, stock_code):
             if stock_code == "600519":
@@ -371,8 +409,7 @@ class AlertWorkerTestCase(unittest.TestCase):
             alert_type="price_change_percent",
             parameters={"direction": "down", "change_pct": 3.0},
         )
-        notifier = MagicMock()
-        notifier.send.side_effect = [RuntimeError("webhook secret failed"), True]
+        notifier = self._notifier(RuntimeError("webhook secret failed"), self._dispatch_result(True))
 
         async def _quote(_monitor, stock_code):
             if stock_code == "600519":
@@ -387,7 +424,112 @@ class AlertWorkerTestCase(unittest.TestCase):
         self.assertEqual(stats["recorded"], 2)
         self.assertEqual(stats["notified"], 1)
         self.assertEqual(len(self._triggers(status="triggered")), 2)
-        self.assertEqual(notifier.send.call_count, 2)
+        self.assertEqual(notifier.send_with_results.call_count, 2)
+
+    def test_notification_dispatch_results_are_recorded_and_success_updates_cooldown(self) -> None:
+        rule = self._create_rule(target="600519", cooldown_policy={"cooldown_seconds": 60})
+
+        class FakeNotifier:
+            def send_with_results(self, *_args, **_kwargs):
+                return NotificationDispatchResult(
+                    dispatched=True,
+                    success=True,
+                    status="partial_failed",
+                    channel_results=[
+                        ChannelAttemptResult(channel="wechat", success=False, error_code="send_failed", retryable=True),
+                        ChannelAttemptResult(channel="custom", success=True, latency_ms=12),
+                    ],
+                )
+
+        worker = AlertWorker(config_provider=lambda: self._config(), service=self.service, notifier=FakeNotifier())
+        with patch(
+            "src.agent.events.EventMonitor._get_realtime_quote",
+            new=AsyncMock(return_value=SimpleNamespace(price=1810.0)),
+        ):
+            stats = worker.run_once()
+
+        self.assertEqual(stats["notified"], 1)
+        triggers = self._triggers(rule_id=rule["id"], status="triggered")
+        self.assertEqual(len(triggers), 1)
+        notifications = self._notifications(trigger_id=triggers[0]["id"])
+        by_channel = {item["channel"]: item for item in notifications}
+        self.assertEqual(set(by_channel), {"wechat", "custom"})
+        self.assertFalse(by_channel["wechat"]["success"])
+        self.assertTrue(by_channel["custom"]["success"])
+        cooldown = self.service.repo.get_rule_cooldown_summary(
+            rule_id=rule["id"],
+            target="600519",
+            severity="warning",
+        )
+        self.assertIsNotNone(cooldown)
+
+    def test_noise_suppression_records_synthetic_attempt_without_upserting_cooldown(self) -> None:
+        rule = self._create_rule(target="600519", cooldown_policy={"cooldown_seconds": 60})
+
+        class FakeNotifier:
+            def send_with_results(self, *_args, **_kwargs):
+                return NotificationDispatchResult(
+                    dispatched=False,
+                    success=False,
+                    status="noise_suppressed",
+                    message="cooldown: duplicated static notification",
+                )
+
+        worker = AlertWorker(config_provider=lambda: self._config(), service=self.service, notifier=FakeNotifier())
+        with patch(
+            "src.agent.events.EventMonitor._get_realtime_quote",
+            new=AsyncMock(return_value=SimpleNamespace(price=1810.0)),
+        ):
+            stats = worker.run_once()
+
+        self.assertEqual(stats["notified"], 0)
+        triggers = self._triggers(rule_id=rule["id"], status="triggered")
+        self.assertEqual(len(triggers), 1)
+        notifications = self._notifications(trigger_id=triggers[0]["id"])
+        self.assertEqual(len(notifications), 1)
+        self.assertEqual(notifications[0]["channel"], "__noise_suppressed__")
+        self.assertEqual(notifications[0]["error_code"], "noise_suppressed")
+        cooldown = self.service.repo.get_rule_cooldown_summary(
+            rule_id=rule["id"],
+            target="600519",
+            severity="warning",
+        )
+        self.assertIsNone(cooldown)
+
+    def test_no_channel_and_all_failed_do_not_upsert_cooldown(self) -> None:
+        rule = self._create_rule(target="600519", cooldown_policy={"cooldown_seconds": 60})
+        dispatches = [
+            NotificationDispatchResult(dispatched=False, success=False, status="no_channel", message="no channel"),
+            NotificationDispatchResult(
+                dispatched=True,
+                success=False,
+                status="all_failed",
+                channel_results=[ChannelAttemptResult(channel="wechat", success=False, error_code="send_failed")],
+            ),
+        ]
+
+        class FakeNotifier:
+            def send_with_results(self, *_args, **_kwargs):
+                return dispatches.pop(0)
+
+        worker = AlertWorker(config_provider=lambda: self._config(), service=self.service, notifier=FakeNotifier())
+        with patch(
+            "src.agent.events.EventMonitor._get_realtime_quote",
+            new=AsyncMock(return_value=SimpleNamespace(price=1810.0)),
+        ):
+            first = worker.run_once()
+            second = worker.run_once()
+
+        self.assertEqual(first["notified"], 0)
+        self.assertEqual(second["notified"], 0)
+        channels = {item["channel"] for item in self._notifications()}
+        self.assertEqual(channels, {"__no_channel__", "wechat"})
+        cooldown = self.service.repo.get_rule_cooldown_summary(
+            rule_id=rule["id"],
+            target="600519",
+            severity="warning",
+        )
+        self.assertIsNone(cooldown)
 
     def test_trigger_record_failure_does_not_block_other_rules(self) -> None:
         self._create_rule(target="600519")
@@ -397,8 +539,7 @@ class AlertWorkerTestCase(unittest.TestCase):
             alert_type="price_change_percent",
             parameters={"direction": "down", "change_pct": 3.0},
         )
-        notifier = MagicMock()
-        notifier.send.return_value = True
+        notifier = self._notifier()
         original_create_trigger = self.service.repo.create_trigger
 
         def _create_trigger(fields):
@@ -423,10 +564,9 @@ class AlertWorkerTestCase(unittest.TestCase):
         self.assertEqual(len(triggers), 1)
         self.assertEqual(triggers[0]["target"], "300750")
 
-    def test_fingerprint_ttl_suppresses_duplicate_notifications_but_expires(self) -> None:
-        self._create_rule(target="600519")
-        notifier = MagicMock()
-        notifier.send.return_value = True
+    def test_db_cooldown_suppresses_duplicate_notifications_but_expires(self) -> None:
+        self._create_rule(target="600519", cooldown_policy={"cooldown_seconds": 60})
+        notifier = self._notifier()
         now = {"value": 1000.0}
 
         worker = AlertWorker(
@@ -446,13 +586,136 @@ class AlertWorkerTestCase(unittest.TestCase):
             now["value"] += 61
             worker.run_once()
 
-        self.assertEqual(notifier.send.call_count, 2)
+        self.assertEqual(notifier.send_with_results.call_count, 2)
+        self.assertEqual(len(self._triggers(status="triggered")), 3)
+        cooldown_attempts = self._notifications(channel="__cooldown__")
+        self.assertEqual(len(cooldown_attempts), 1)
+        self.assertEqual(cooldown_attempts[0]["error_code"], "cooldown_active")
+
+    def test_db_cooldown_read_failure_uses_fingerprint_fallback(self) -> None:
+        self._create_rule(target="600519", cooldown_policy={"cooldown_seconds": 60})
+        notifier = self._notifier()
+        now = {"value": 1000.0}
+
+        worker = AlertWorker(
+            config_provider=lambda: self._config(),
+            service=self.service,
+            notifier=notifier,
+            now_provider=lambda: now["value"],
+            fingerprint_ttl_seconds=86400,
+        )
+        with patch.object(
+            self.service.repo,
+            "get_active_cooldown",
+            side_effect=RuntimeError("database locked token=secret-token"),
+        ), patch(
+            "src.agent.events.EventMonitor._get_realtime_quote",
+            new=AsyncMock(return_value=SimpleNamespace(price=1810.0)),
+        ):
+            first = worker.run_once()
+            now["value"] += 10
+            second = worker.run_once()
+            now["value"] += 61
+            third = worker.run_once()
+
+        self.assertEqual(first["notified"], 1)
+        self.assertEqual(second["cooldown_suppressed"], 1)
+        self.assertEqual(third["notified"], 1)
+        self.assertEqual(notifier.send_with_results.call_count, 2)
+        self.assertEqual(len(self._triggers(status="triggered")), 3)
+        suppressed_attempts = self._notifications(channel="__cooldown_read_failed__")
+        self.assertEqual(len(suppressed_attempts), 1)
+        self.assertEqual(suppressed_attempts[0]["error_code"], "cooldown_read_failed")
+        self.assertNotIn("secret-token", suppressed_attempts[0]["diagnostics"] or "")
+
+    def test_failed_db_notification_does_not_start_read_failure_fallback_window(self) -> None:
+        self._create_rule(target="600519", cooldown_policy={"cooldown_seconds": 60})
+        notifier = self._notifier(self._dispatch_result(False), self._dispatch_result(True))
+        now = {"value": 1000.0}
+
+        worker = AlertWorker(
+            config_provider=lambda: self._config(),
+            service=self.service,
+            notifier=notifier,
+            now_provider=lambda: now["value"],
+            fingerprint_ttl_seconds=60,
+        )
+        with patch.object(
+            self.service.repo,
+            "get_active_cooldown",
+            side_effect=RuntimeError("database locked"),
+        ), patch(
+            "src.agent.events.EventMonitor._get_realtime_quote",
+            new=AsyncMock(return_value=SimpleNamespace(price=1810.0)),
+        ):
+            first = worker.run_once()
+            now["value"] += 10
+            second = worker.run_once()
+            now["value"] += 10
+            third = worker.run_once()
+
+        self.assertEqual(first["notified"], 0)
+        self.assertEqual(second["notified"], 1)
+        self.assertEqual(third["cooldown_suppressed"], 1)
+        self.assertEqual(notifier.send_with_results.call_count, 2)
+        self.assertEqual(len(self._notifications(channel="__cooldown_read_failed__")), 1)
+
+    def test_db_rule_with_cooldown_zero_is_not_suppressed_by_fingerprint(self) -> None:
+        self._create_rule(target="600519", cooldown_policy={"cooldown_seconds": 0})
+        notifier = self._notifier()
+        now = {"value": 1000.0}
+
+        worker = AlertWorker(
+            config_provider=lambda: self._config(),
+            service=self.service,
+            notifier=notifier,
+            now_provider=lambda: now["value"],
+            fingerprint_ttl_seconds=60,
+        )
+        with patch(
+            "src.agent.events.EventMonitor._get_realtime_quote",
+            new=AsyncMock(return_value=SimpleNamespace(price=1810.0)),
+        ):
+            worker.run_once()
+            now["value"] += 10
+            worker.run_once()
+
+        self.assertEqual(notifier.send_with_results.call_count, 2)
+        self.assertEqual(len(self._triggers(status="triggered")), 2)
+        self.assertEqual(self._notifications(channel="__cooldown__"), [])
+
+    def test_legacy_rule_still_uses_fingerprint_suppression(self) -> None:
+        raw_rules = '[{"stock_code":"600519","alert_type":"price_cross","direction":"above","price":1800}]'
+        notifier = self._notifier()
+        now = {"value": 1000.0}
+
+        worker = AlertWorker(
+            config_provider=lambda: self._config(raw_rules),
+            service=self.service,
+            notifier=notifier,
+            now_provider=lambda: now["value"],
+            fingerprint_ttl_seconds=60,
+        )
+        with patch(
+            "src.agent.events.EventMonitor._get_realtime_quote",
+            new=AsyncMock(return_value=SimpleNamespace(price=1810.0)),
+        ):
+            worker.run_once()
+            now["value"] += 10
+            worker.run_once()
+            now["value"] += 61
+            worker.run_once()
+
+        self.assertEqual(notifier.send_with_results.call_count, 2)
         self.assertEqual(len(self._triggers(status="triggered")), 3)
 
-    def test_failed_notification_attempts_do_not_consume_fingerprint_window(self) -> None:
+    def test_failed_db_notification_attempts_do_not_start_cooldown_window(self) -> None:
         self._create_rule(target="600519")
-        notifier = MagicMock()
-        notifier.send.side_effect = [False, RuntimeError("temporary webhook failure"), True]
+        notifier = self._notifier(
+            self._dispatch_result(False),
+            RuntimeError("temporary webhook failure"),
+            self._dispatch_result(True),
+        )
         now = {"value": 1000.0}
 
         worker = AlertWorker(
@@ -478,7 +741,7 @@ class AlertWorkerTestCase(unittest.TestCase):
         self.assertEqual(second["notified"], 0)
         self.assertEqual(third["notified"], 1)
         self.assertEqual(fourth["notified"], 0)
-        self.assertEqual(notifier.send.call_count, 3)
+        self.assertEqual(notifier.send_with_results.call_count, 3)
         self.assertEqual(len(self._triggers(status="triggered")), 4)
 
 

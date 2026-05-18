@@ -40,6 +40,28 @@ function testVariant(result: AlertRuleTestResponse): 'success' | 'warning' | 'da
   return result.triggered ? 'success' : 'warning';
 }
 
+const notificationChannelLabel: Record<string, string> = {
+  __cooldown__: '业务冷却',
+  __cooldown_read_failed__: '冷却读取失败',
+  __noise_suppressed__: '通知降噪',
+  __no_channel__: '无可用渠道',
+  __dispatch__: '通知调度',
+  __context__: '会话渠道',
+};
+
+function formatNotificationChannel(channel: string): string {
+  return notificationChannelLabel[channel] ?? channel;
+}
+
+function formatNotificationStatus(notification: AlertNotificationItem): string {
+  if (notification.success) return '成功';
+  if (notification.errorCode === 'cooldown_active') return '冷却抑制';
+  if (notification.errorCode === 'cooldown_read_failed') return '冷却读取失败';
+  if (notification.errorCode === 'noise_suppressed') return '降噪抑制';
+  if (notification.errorCode === 'no_channel') return '无渠道';
+  return '失败';
+}
+
 const AlertsPage: React.FC = () => {
   useEffect(() => {
     document.title = '告警中心 - DSA';
@@ -299,8 +321,8 @@ const AlertsPage: React.FC = () => {
               <tbody className="divide-y divide-border/40">
                 {notifications.map((notification) => (
                   <tr key={notification.id}>
-                    <td className="px-3 py-3">{notification.channel}</td>
-                    <td className="px-3 py-3">{notification.success ? '成功' : '失败'}</td>
+                    <td className="px-3 py-3">{formatNotificationChannel(notification.channel)}</td>
+                    <td className="px-3 py-3">{formatNotificationStatus(notification)}</td>
                     <td className="px-3 py-3">{notification.errorCode ?? '--'}</td>
                     <td className="px-3 py-3">{notification.latencyMs == null ? '--' : `${notification.latencyMs}ms`}</td>
                     <td className="px-3 py-3">{formatDateTime(notification.createdAt)}</td>

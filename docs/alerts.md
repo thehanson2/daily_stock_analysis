@@ -192,6 +192,33 @@ P3 不做：
 - 不实现规则编辑、target/source 高级筛选、watchlist/portfolio 目标、技术指标规则或 Market Light 联动。
 - 不执行 `cooldown_policy` / `notification_policy`，不写 `alert_notifications`。
 
+## P4 通知结果与持久化冷却
+
+P4 让真实告警触发具备可排障的通知结果，并让通过 Alert API 创建的持久化规则具备可重启保持的业务冷却状态。
+
+- 每次真实触发仍写入本轮 `alert_triggers`；即使后续被冷却或通知降噪抑制，也保留“规则确实触发”的审计记录。
+- `alert_notifications` 记录真实 per-channel notification attempt，包括 `channel`、`success`、`error_code`、`retryable`、`latency_ms` 和脱敏后的 `diagnostics`。
+- 非渠道发送状态使用 synthetic channel 记录：
+  - `__cooldown__`：告警业务冷却抑制，`error_code="cooldown_active"`。
+  - `__cooldown_read_failed__`：读取持久化冷却状态失败后，由 worker 进程内临时兜底抑制，`error_code="cooldown_read_failed"`。
+  - `__noise_suppressed__`：通知基础设施降噪抑制，`error_code="noise_suppressed"`。
+  - `__no_channel__`：alert 路由未命中任何可用通知渠道。
+  - `__dispatch__`：通知调度级 fallback 或异常。
+- cooldown 分层：
+  - DB 持久化规则正常路径使用 `alert_cooldowns` 作为告警业务冷却，不再由 worker 进程内 fingerprint 决定；仅当读取持久化冷却状态失败时，临时使用进程内 fingerprint 防止同一规则在 DB 异常期间每轮重复推送。
+  - legacy `AGENT_EVENT_ALERT_RULES_JSON` 规则继续使用 worker 进程内 fingerprint，不写 `alert_cooldowns`。
+  - `notification_noise.py` 仍作为通知基础设施层的全局安全网；它不是告警业务 cooldown，且被其抑制时不会写入或延长 `alert_cooldowns`。
+- DB 规则的 `cooldown_policy.cooldown_seconds` 归一为非负整数；缺失时使用默认 24 小时业务冷却，`0` 表示关闭 DB 业务冷却。
+- `GET /api/v1/alerts/rules` 会返回只读 `last_triggered_at` / `cooldown_until` / `cooldown_active` 摘要；`cooldown_active` 由后端按同一冷却时间语义计算，Web 不在浏览器本地解析 naive ISO 字符串来推断状态。
+- Web 告警中心只读展示冷却状态和通知结果，不提供 cooldown policy 编辑表单。
+
+P4 不做：
+
+- 不新增技术指标、持仓、自选股、portfolio、watchlist 或 Market Light 告警规则。
+- 不实现 target-level 跨规则合并冷却；目标级合并留到持仓/市场联动阶段。
+- 不重写通知渠道网关；`NotificationService.send()` 继续保持布尔返回兼容，结构化结果通过新增兼容接口提供。
+- 不自动迁移、删除或改写 legacy `AGENT_EVENT_ALERT_RULES_JSON`。
+
 ## Phase 边界
 
 - P0：本文档、契约、存储评估和兼容测试。
@@ -219,3 +246,4 @@ P3 不做：
 - P0 是文档和测试收口。若只回滚 P0，revert 对应 PR 即可；没有数据库、配置或用户数据迁移需要额外处理。
 - P1 新增 Alert API 代码和 `alert_rules` / `alert_triggers` / `alert_notifications` SQLite 表。最小回滚方式是 revert P1 PR；revert 会移除 API、service、repository、schema 和 ORM 定义，但已经由 `Base.metadata.create_all()` 创建的 SQLite 表与数据不会自动删除。如需清理，需要维护者在确认不再需要历史数据后手动删除相关表。
 - P3 是 Web 和文档改动。最小回滚方式是 revert P3 PR；不会删除已有规则、触发历史或 legacy JSON 配置。
+- P4 新增 `alert_cooldowns` SQLite 表并开始写入 `alert_notifications`。最小回滚方式是 revert P4 PR；已经创建的 `alert_cooldowns`、`alert_triggers`、`alert_notifications` 数据不会自动删除。如需清理，需要维护者确认后手动删除对应表或记录。

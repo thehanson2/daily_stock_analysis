@@ -49,6 +49,10 @@ function formatParameters(rule: AlertRuleItem): string {
   return `${rule.parameters.multiplier ?? '--'}x`;
 }
 
+function isCoolingDown(rule: AlertRuleItem): boolean {
+  return rule.cooldownActive === true;
+}
+
 interface AlertRuleListProps {
   rules: AlertRuleItem[];
   total: number;
@@ -122,7 +126,7 @@ export const AlertRuleList: React.FC<AlertRuleListProps> = ({
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-x-auto">
-          <table className="w-full min-w-[860px] text-left text-sm">
+          <table className="w-full min-w-[960px] text-left text-sm">
             <thead className="border-b border-border/60 text-xs uppercase text-muted-text">
               <tr>
                 <th className="px-3 py-2 font-medium">规则</th>
@@ -130,6 +134,7 @@ export const AlertRuleList: React.FC<AlertRuleListProps> = ({
                 <th className="px-3 py-2 font-medium">类型</th>
                 <th className="px-3 py-2 font-medium">参数</th>
                 <th className="px-3 py-2 font-medium">状态</th>
+                <th className="px-3 py-2 font-medium">冷却</th>
                 <th className="px-3 py-2 font-medium">更新时间</th>
                 <th className="px-3 py-2 text-right font-medium">操作</th>
               </tr>
@@ -155,6 +160,10 @@ export const AlertRuleList: React.FC<AlertRuleListProps> = ({
                     <Badge variant={rule.enabled ? 'success' : 'default'}>
                       {rule.enabled ? '已启用' : '已停用'}
                     </Badge>
+                  </td>
+                  <td className="px-3 py-3 text-xs text-secondary-text">
+                    <div>{isCoolingDown(rule) ? '冷却中' : '未冷却'}</div>
+                    <div className="mt-1">{formatDateTime(rule.cooldownUntil)}</div>
                   </td>
                   <td className="px-3 py-3 text-xs text-secondary-text">{formatDateTime(rule.updatedAt ?? rule.createdAt)}</td>
                   <td className="px-3 py-3">

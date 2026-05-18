@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from datetime import date, datetime
 from typing import Any, Dict, Optional
@@ -18,13 +19,22 @@ from src.agent.events import (
     validate_event_alert_rule,
 )
 from src.repositories.alert_repo import AlertRepository
-from src.storage import AlertNotificationRecord, AlertRuleRecord, AlertTriggerRecord, DatabaseManager
+from src.storage import (
+    AlertCooldownRecord,
+    AlertNotificationRecord,
+    AlertRuleRecord,
+    AlertTriggerRecord,
+    DatabaseManager,
+)
+from src.utils.sanitize import sanitize_diagnostic_text
 
 
 SUPPORTED_ALERT_TYPES = frozenset({"price_cross", "price_change_percent", "volume_spike"})
 SUPPORTED_TARGET_SCOPES = frozenset({"single_symbol"})
 SUPPORTED_SEVERITIES = frozenset({"info", "warning", "critical"})
 NULLABLE_RULE_UPDATE_FIELDS = frozenset({"cooldown_policy", "notification_policy"})
+
+logger = logging.getLogger(__name__)
 
 
 class AlertServiceError(ValueError):
@@ -70,7 +80,7 @@ class AlertService:
             raise AlertServiceError("No fields provided for update")
         self._validate_rule_update_payload(payload)
 
-        merged = self._serialize_rule(row)
+        merged = self._serialize_rule_base(row)
         merged.update(payload)
         fields = self._normalize_rule_payload(merged, source=merged.get("source") or "api")
         updated = self.repo.update_rule(rule_id, fields)
@@ -684,8 +694,8 @@ class AlertService:
             raise AlertServiceError(f"{field_name} must be > 0")
         return number
 
-    def _to_runtime_rule(self, row: AlertRuleRecord):
-        data = self._serialize_rule(row)
+    def _to_runtime_rule(self, row: AlertRuleRecord, data: Optional[Dict[str, Any]] = None):
+        data = data or self._serialize_rule_base(row)
         parameters = data["parameters"]
         if data["alert_type"] == "price_cross":
             return PriceAlert(
@@ -710,6 +720,16 @@ class AlertService:
         raise UnsupportedAlertTypeError(f"unsupported alert_type for P1 Alert API: {data['alert_type']}")
 
     def _serialize_rule(self, row: AlertRuleRecord) -> Dict[str, Any]:
+        data = self._serialize_rule_base(row)
+        cooldown_summary = self._cooldown_summary_for_rule(row)
+        data.update({
+            "last_triggered_at": cooldown_summary.get("last_triggered_at"),
+            "cooldown_until": cooldown_summary.get("cooldown_until"),
+            "cooldown_active": cooldown_summary.get("cooldown_active"),
+        })
+        return data
+
+    def _serialize_rule_base(self, row: AlertRuleRecord) -> Dict[str, Any]:
         return {
             "id": row.id,
             "name": row.name,
@@ -724,6 +744,37 @@ class AlertService:
             "notification_policy": self._load_json(row.notification_policy, default=None),
             "created_at": row.created_at.isoformat() if row.created_at else None,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        }
+
+    def _cooldown_summary_for_rule(self, row: AlertRuleRecord) -> Dict[str, Any]:
+        try:
+            cooldown = self.repo.get_rule_cooldown_summary(
+                rule_id=int(row.id),
+                target=str(row.target),
+                severity=str(row.severity) if row.severity else None,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[AlertService] Failed to load alert cooldown summary for rule %s: %s",
+                getattr(row, "id", "?"),
+                self._sanitize_text(str(exc) or "cooldown summary read failed"),
+            )
+            return {"last_triggered_at": None, "cooldown_until": None, "cooldown_active": False}
+        return self._serialize_cooldown_summary(cooldown)
+
+    @staticmethod
+    def _serialize_cooldown_summary(row: Optional[AlertCooldownRecord]) -> Dict[str, Any]:
+        if row is None:
+            return {"last_triggered_at": None, "cooldown_until": None, "cooldown_active": False}
+        cooldown_active = bool(
+            row.state == "active"
+            and row.cooldown_until is not None
+            and row.cooldown_until > datetime.now()
+        )
+        return {
+            "last_triggered_at": row.last_triggered_at.isoformat() if row.last_triggered_at else None,
+            "cooldown_until": row.cooldown_until.isoformat() if row.cooldown_until else None,
+            "cooldown_active": cooldown_active,
         }
 
     def _serialize_trigger(self, row: AlertTriggerRecord) -> Dict[str, Any]:
@@ -787,10 +838,4 @@ class AlertService:
 
     @staticmethod
     def _sanitize_text(text: Any) -> str:
-        sanitized = str(text or "").strip()
-        if not sanitized:
-            return ""
-        sanitized = re.sub(r"(?i)(bearer\s+)[a-z0-9._\-:]+", r"\1[REDACTED]", sanitized)
-        sanitized = re.sub(r"(?i)(token|secret|password|sendkey)([=:]\s*)[^\s,;&]+", r"\1\2[REDACTED]", sanitized)
-        sanitized = re.sub(r"https?://[^\s]+", "[REDACTED_URL]", sanitized)
-        return " ".join(sanitized.split())[:300]
+        return sanitize_diagnostic_text(text)

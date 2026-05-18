@@ -7,7 +7,7 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -23,7 +23,8 @@ except ModuleNotFoundError:
 import src.auth as auth
 from api.app import create_app
 from src.config import Config
-from src.storage import AlertNotificationRecord, AlertTriggerRecord, DatabaseManager
+from src.repositories.alert_repo import AlertRepository
+from src.storage import AlertCooldownRecord, AlertNotificationRecord, AlertTriggerRecord, Base, DatabaseManager
 
 
 def _reset_auth_globals() -> None:
@@ -97,6 +98,9 @@ class AlertApiTestCase(unittest.TestCase):
         self.assertEqual(created["parameters"]["price"], 1800.0)
         self.assertTrue(created["enabled"])
         self.assertEqual(created["source"], "api")
+        self.assertIsNone(created["last_triggered_at"])
+        self.assertIsNone(created["cooldown_until"])
+        self.assertFalse(created["cooldown_active"])
         self.assertIsNotNone(created["created_at"])
         self.assertIsNotNone(created["updated_at"])
 
@@ -132,6 +136,43 @@ class AlertApiTestCase(unittest.TestCase):
 
         missing_resp = self.client.get(f"/api/v1/alerts/rules/{rule_id}")
         self.assertEqual(missing_resp.status_code, 404)
+
+    def test_rule_response_includes_server_cooldown_active_flag(self) -> None:
+        created = self._create_rule()
+        repo = AlertRepository(self.db)
+        now_dt = datetime.now()
+        cooldown_until = now_dt + timedelta(minutes=5)
+        repo.upsert_cooldown(
+            rule_id=created["id"],
+            rule_key="single_symbol:600519:price_cross:{}",
+            target="600519",
+            severity="warning",
+            last_triggered_at=now_dt,
+            cooldown_until=cooldown_until,
+            reason="active cooldown",
+        )
+
+        list_resp = self.client.get("/api/v1/alerts/rules")
+        self.assertEqual(list_resp.status_code, 200, list_resp.text)
+        item = list_resp.json()["items"][0]
+        self.assertEqual(item["id"], created["id"])
+        self.assertEqual(item["cooldown_until"], cooldown_until.isoformat())
+        self.assertTrue(item["cooldown_active"])
+
+        expired_at = datetime.now() - timedelta(minutes=5)
+        repo.upsert_cooldown(
+            rule_id=created["id"],
+            rule_key="single_symbol:600519:price_cross:{}",
+            target="600519",
+            severity="warning",
+            last_triggered_at=expired_at,
+            cooldown_until=expired_at,
+            reason="expired cooldown",
+        )
+
+        detail_resp = self.client.get(f"/api/v1/alerts/rules/{created['id']}")
+        self.assertEqual(detail_resp.status_code, 200, detail_resp.text)
+        self.assertFalse(detail_resp.json()["cooldown_active"])
 
     def test_rule_update_rejects_empty_payload(self) -> None:
         rule = self._create_rule()
@@ -417,6 +458,57 @@ class AlertApiTestCase(unittest.TestCase):
         self.assertTrue(notification_payload["items"][0]["retryable"])
         self.assertNotIn("secret-token", str(notification_payload))
         self.assertNotIn("example.com/webhook", str(notification_payload))
+
+    def test_alert_cooldowns_table_create_all_is_idempotent(self) -> None:
+        constraint_names = {constraint.name for constraint in AlertCooldownRecord.__table__.constraints}
+        self.assertIn("uix_alert_cooldown_rule_target_severity", constraint_names)
+
+        Base.metadata.create_all(self.db._engine)
+        Base.metadata.create_all(self.db._engine)
+
+        with self.db.get_session() as session:
+            session.add(
+                AlertCooldownRecord(
+                    rule_id=1,
+                    rule_key="single_symbol:600519:price_cross:{}",
+                    target="600519",
+                    severity="warning",
+                    state="active",
+                )
+            )
+            session.commit()
+            count = session.query(AlertCooldownRecord).count()
+
+        self.assertEqual(count, 1)
+
+    def test_alert_cooldown_upsert_keeps_one_row_per_rule_target_severity(self) -> None:
+        repo = AlertRepository(self.db)
+        first = repo.upsert_cooldown(
+            rule_id=1,
+            rule_key="single_symbol:600519:price_cross:{}",
+            target="600519",
+            severity="warning",
+            last_triggered_at=datetime(2026, 5, 18, 10, 0, 0),
+            cooldown_until=datetime(2026, 5, 18, 11, 0, 0),
+            reason="first trigger",
+        )
+        second = repo.upsert_cooldown(
+            rule_id=1,
+            rule_key="single_symbol:600519:price_cross:{}",
+            target="600519",
+            severity="warning",
+            last_triggered_at=datetime(2026, 5, 18, 10, 30, 0),
+            cooldown_until=datetime(2026, 5, 18, 11, 30, 0),
+            reason="updated trigger",
+        )
+
+        with self.db.get_session() as session:
+            rows = session.query(AlertCooldownRecord).all()
+
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].reason, "updated trigger")
+        self.assertEqual(rows[0].cooldown_until, datetime(2026, 5, 18, 11, 30, 0))
 
 
 if __name__ == "__main__":

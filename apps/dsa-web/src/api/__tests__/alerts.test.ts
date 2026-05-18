@@ -36,6 +36,9 @@ describe('alertsApi', () => {
             severity: 'warning',
             enabled: true,
             source: 'api',
+            last_triggered_at: '2026-05-18T09:05:00',
+            cooldown_until: '2026-05-18T10:05:00',
+            cooldown_active: true,
             created_at: '2026-05-18T09:00:00',
             updated_at: '2026-05-18T09:10:00',
           },
@@ -66,6 +69,8 @@ describe('alertsApi', () => {
     expect(result.pageSize).toBe(20);
     expect(result.items[0].targetScope).toBe('single_symbol');
     expect(result.items[0].alertType).toBe('price_cross');
+    expect(result.items[0].cooldownUntil).toBe('2026-05-18T10:05:00');
+    expect(result.items[0].cooldownActive).toBe(true);
     expect(result.items[0].updatedAt).toBe('2026-05-18T09:10:00');
   });
 

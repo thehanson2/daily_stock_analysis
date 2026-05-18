@@ -157,3 +157,23 @@ def test_alerts_doc_describes_p1_rollback_for_created_tables() -> None:
         "手动删除相关表",
     ):
         assert token in doc
+
+
+def test_alerts_doc_defines_p4_notification_and_cooldown_scope() -> None:
+    doc = _read_doc()
+
+    for token in (
+        "## P4 通知结果与持久化冷却",
+        "`alert_cooldowns`",
+        "`alert_notifications`",
+        "`__cooldown__`",
+        "`__cooldown_read_failed__`",
+        "`__noise_suppressed__`",
+        "notification_noise.py",
+        "DB 持久化规则正常路径使用 `alert_cooldowns`",
+        "读取持久化冷却状态失败",
+        "legacy `AGENT_EVENT_ALERT_RULES_JSON` 规则继续使用 worker 进程内 fingerprint",
+        "不会写入或延长 `alert_cooldowns`",
+        "最小回滚方式是 revert P4 PR",
+    ):
+        assert token in doc
