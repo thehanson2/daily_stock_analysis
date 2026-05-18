@@ -171,6 +171,27 @@ P2 不做：
 - 不实现 `alert_cooldown`、`cooldown_policy` 或 `notification_policy` 执行语义。
 - 不实现 MACD、KDJ、CCI、RSI、持仓风险或 Market Light 告警规则。
 
+## P3 Web 告警中心 MVP
+
+P3 在 WebUI 中新增 `/alerts` 告警中心入口，让用户不需要直接编辑 legacy JSON 即可管理当前三类运行时规则。
+
+- 侧边栏新增“告警”入口，页面支持规则列表、分页、启停筛选和规则类型筛选。
+- 规则创建表单只支持 `single_symbol` 目标范围和当前已可执行的三类规则：
+  - `price_cross`：`direction` 为 `above` / `below`，并填写 `price`。
+  - `price_change_percent`：`direction` 为 `up` / `down`，并填写 `change_pct`。
+  - `volume_spike`：填写 `multiplier`。
+- 规则操作支持启用、停用、删除和一次性 dry-run 测试。
+- dry-run 测试只展示 `AlertRuleTestResponse` 已声明字段：规则 ID、状态、是否触发、观察值和消息；`threshold`、`data_source`、`data_timestamp` 等扩展诊断字段需要后端 schema 明确暴露后再展示。
+- 触发历史展示 P2 worker 已写入的 `triggered`、`skipped`、`degraded`、`failed` 记录；正常 `not_triggered` 仍不会写入历史。
+- 通知尝试区域只查询现有 `GET /api/v1/alerts/notifications`；由于 P2 运行时不写 per-channel notification attempt，当前通常显示“暂无通知尝试记录”空态，不把触发状态推断为通知投递结果。
+- Web 页面不暴露 `AGENT_EVENT_ALERT_RULES_JSON` 编辑入口，不自动迁移、删除或改写 legacy 配置。
+
+P3 不做：
+
+- 不新增或修改后端 API、schema、storage 或 worker 行为。
+- 不实现规则编辑、target/source 高级筛选、watchlist/portfolio 目标、技术指标规则或 Market Light 联动。
+- 不执行 `cooldown_policy` / `notification_policy`，不写 `alert_notifications`。
+
 ## Phase 边界
 
 - P0：本文档、契约、存储评估和兼容测试。
@@ -197,3 +218,4 @@ P2 不做：
 
 - P0 是文档和测试收口。若只回滚 P0，revert 对应 PR 即可；没有数据库、配置或用户数据迁移需要额外处理。
 - P1 新增 Alert API 代码和 `alert_rules` / `alert_triggers` / `alert_notifications` SQLite 表。最小回滚方式是 revert P1 PR；revert 会移除 API、service、repository、schema 和 ORM 定义，但已经由 `Base.metadata.create_all()` 创建的 SQLite 表与数据不会自动删除。如需清理，需要维护者在确认不再需要历史数据后手动删除相关表。
+- P3 是 Web 和文档改动。最小回滚方式是 revert P3 PR；不会删除已有规则、触发历史或 legacy JSON 配置。

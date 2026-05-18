@@ -18,6 +18,7 @@ export interface AnalysisRequest {
   originalQuery?: string;
   selectionSource?: 'manual' | 'autocomplete' | 'import' | 'image';
   notify?: boolean;
+  skills?: string[];
 }
 
 export interface MarketReviewRequest {
@@ -166,6 +167,7 @@ export interface TaskStatus {
   stockName?: string;
   originalQuery?: string;
   selectionSource?: string;
+  skills?: string[];
 }
 
 /** Task details used by task list and SSE events */

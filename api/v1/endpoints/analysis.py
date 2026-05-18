@@ -324,6 +324,7 @@ def _handle_async_analysis_batch(
     original_query = request.original_query if (is_single or preserve_batch_metadata) else None
     selection_source = request.selection_source if (is_single or preserve_batch_metadata) else None
     notify = getattr(request, "notify", True)
+    skills = getattr(request, "skills", None)
 
     submit_kwargs = dict(
         stock_codes=stock_codes,
@@ -334,6 +335,8 @@ def _handle_async_analysis_batch(
         force_refresh=request.force_refresh,
         notify=notify,
     )
+    if skills is not None:
+        submit_kwargs["skills"] = skills
 
     accepted_tasks, duplicate_errors = task_queue.submit_tasks_batch(**submit_kwargs)
 
@@ -415,6 +418,7 @@ def _handle_sync_analysis(
             force_refresh=request.force_refresh,
             query_id=query_id,
             send_notification=getattr(request, "notify", True),
+            skills=getattr(request, "skills", None),
         )
 
         if result is None:
@@ -748,6 +752,7 @@ def get_analysis_status(task_id: str) -> TaskStatus:
             stock_name=task.stock_name,
             original_query=task.original_query,
             selection_source=task.selection_source,
+            skills=getattr(task, "skills", None),
         )
     
     # 2. 从数据库查询已完成的记录
@@ -789,8 +794,12 @@ def get_analysis_status(task_id: str) -> TaskStatus:
             # Extract current_price / change_pct from context_snapshot
             current_price = None
             change_pct = None
+            skills = None
             context_snapshot = parse_json_field(getattr(record, 'context_snapshot', None))
             if context_snapshot and isinstance(context_snapshot, dict):
+                raw_skills = context_snapshot.get("skills")
+                if isinstance(raw_skills, list):
+                    skills = [str(skill) for skill in raw_skills]
                 enhanced_context = context_snapshot.get('enhanced_context') or {}
                 realtime = enhanced_context.get('realtime') or {}
                 current_price = realtime.get('price')
@@ -841,7 +850,8 @@ def get_analysis_status(task_id: str) -> TaskStatus:
                     report=report_dict,
                     created_at=record.created_at.isoformat() if record.created_at else datetime.now().isoformat()
                 ),
-                error=None
+                error=None,
+                skills=skills,
             )
 
     except Exception as e:

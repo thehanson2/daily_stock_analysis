@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] 新增 Finnhub / AlphaVantage 美股数据源适配器，扩展美股日线 failover 链至 Finnhub(P2) -> AlphaVantage(P3) -> Yfinance(P4) -> Longbridge(P5)。
 - [修复] AlphaVantage 适配器在 newest-first 原始数据下 pct_chg 计算错误：改为先按日期升序排序再计算涨跌幅。
 - [修复] 美股日线路由未包含 Finnhub / AlphaVantage：扩展 `get_daily_data()` 美股分支的 source_order 以覆盖新增数据源。
+- [文档] 新增小白客户端安装与配置指南，说明桌面客户端下载、基础模型配置、新闻源配置和常见问题。
+- [新功能] Web 首页个股分析支持选择策略。
+- [新功能] 新增热点题材、事件驱动、成长质量和预期重估策略。
+- [新功能] Web 新增告警中心 MVP，支持现有三类告警规则的创建、列表、启停、删除、dry-run 测试和触发历史查看。
 
 ## [3.17.1] - 2026-05-16
 
