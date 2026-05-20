@@ -16,6 +16,7 @@ import pandas as pd
 from src.config import Config
 from src.notification import ChannelAttemptResult, NotificationDispatchResult
 from src.services.alert_indicators import (
+    _calculate_rsi,
     compute_requested_days,
     compute_required_bars,
     evaluate_indicator_alert,
@@ -81,6 +82,14 @@ class AlertIndicatorHelperTestCase(unittest.TestCase):
 
         self.assertEqual(triggered.status, "triggered")
         self.assertEqual(level_only.status, "not_triggered")
+
+    def test_rsi_uses_wilder_not_sma(self) -> None:
+        close = pd.Series([10.0, 9.0, 11.0])
+        old_sma_rsi = 66.66666666666666
+        wilder_rsi = _calculate_rsi(close, 2)
+
+        self.assertNotAlmostEqual(float(wilder_rsi.iloc[-1]), old_sma_rsi)
+        self.assertAlmostEqual(float(wilder_rsi.iloc[-1]), 80.0)
 
     def test_indicator_formulas_cover_rsi_macd_kdj_cci_and_chinese_columns(self) -> None:
         rsi_params = normalize_indicator_parameters("rsi_threshold", {
@@ -149,7 +158,7 @@ class AlertIndicatorHelperTestCase(unittest.TestCase):
         )
 
         self.assertEqual(rsi.status, "triggered")
-        self.assertAlmostEqual(rsi.observed_value, 66.66666666666666)
+        self.assertAlmostEqual(rsi.observed_value, 80.0)
         self.assertEqual(macd.status, "triggered")
         self.assertAlmostEqual(macd.observed_value, 0.321823559670782)
         self.assertEqual(kdj.status, "triggered")
