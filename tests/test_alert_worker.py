@@ -348,6 +348,40 @@ class AlertWorkerTestCase(unittest.TestCase):
         self.assertEqual(notifications[0]["channel"], "custom")
         self.assertTrue(notifications[0]["success"])
 
+    def test_create_trigger_if_absent_rejects_non_dedupable_history(self) -> None:
+        cases = [
+            {
+                "name": "non_triggered_status",
+                "fields": {
+                    "rule_id": 1,
+                    "target": "600519",
+                    "status": "skipped",
+                    "data_timestamp": date(2026, 5, 15),
+                },
+            },
+            {
+                "name": "missing_rule_id",
+                "fields": {
+                    "target": "600519",
+                    "status": "triggered",
+                    "data_timestamp": date(2026, 5, 15),
+                },
+            },
+            {
+                "name": "missing_data_timestamp",
+                "fields": {
+                    "rule_id": 1,
+                    "target": "600519",
+                    "status": "triggered",
+                    "data_timestamp": None,
+                },
+            },
+        ]
+        for case in cases:
+            with self.subTest(case["name"]):
+                with self.assertRaisesRegex(ValueError, "requires triggered status"):
+                    self.service.repo.create_trigger_if_absent(case["fields"])
+
     def test_legacy_rules_coexist_with_db_rules_and_db_rule_wins_duplicate_key(self) -> None:
         self._create_rule(target="600519")
         legacy_rules = (
@@ -372,6 +406,34 @@ class AlertWorkerTestCase(unittest.TestCase):
         self.assertEqual(stats["triggered"], 2)
         targets = {item["target"] for item in self._triggers()}
         self.assertEqual(targets, {"600519", "300750"})
+
+    def test_legacy_rules_keep_existing_duplicate_trigger_history(self) -> None:
+        legacy_rules = (
+            '[{"stock_code":"600519","alert_type":"price_cross","direction":"above","price":1800}]'
+        )
+        notifier = self._notifier()
+
+        async def _quote(_monitor, _stock_code):
+            return SimpleNamespace(price=1810.0)
+
+        worker = AlertWorker(
+            config_provider=lambda: self._config(legacy_rules),
+            service=self.service,
+            notifier=notifier,
+        )
+        with patch("src.agent.events.EventMonitor._get_realtime_quote", new=_quote):
+            first = worker.run_once()
+            second = worker.run_once()
+
+        self.assertEqual(first["triggered"], 1)
+        self.assertEqual(first["recorded"], 1)
+        self.assertEqual(second["triggered"], 1)
+        self.assertEqual(second["recorded"], 1)
+        triggers = self._triggers(status="triggered")
+        self.assertEqual(len(triggers), 2)
+        self.assertTrue(all(item["rule_id"] is None for item in triggers))
+        self.assertTrue(all(item["data_timestamp"] is None for item in triggers))
+        notifier.send_with_results.assert_called_once()
 
     def test_legacy_json_parse_failure_does_not_crash_or_block_persisted_rules(self) -> None:
         before = self.env_path.read_text(encoding="utf-8")
@@ -575,6 +637,47 @@ class AlertWorkerTestCase(unittest.TestCase):
         self.assertEqual(triggers[0]["data_timestamp"], "2026-05-15T00:00:00")
         notifier.send_with_results.assert_called_once()
 
+    def test_volume_spike_history_deduplicates_same_daily_signal(self) -> None:
+        rule = self._create_rule(
+            name="Volume",
+            target="000858",
+            alert_type="volume_spike",
+            parameters={"multiplier": 2.0},
+            cooldown_policy={"cooldown_seconds": 60},
+        )
+        manager = MagicMock()
+        manager.get_daily_data.return_value = (
+            pd.DataFrame({
+                "date": [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)],
+                "volume": [1000, 1000, 5000],
+            }),
+            "unit-test",
+        )
+        notifier = self._notifier()
+
+        async def _run_inline(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        worker = AlertWorker(config_provider=lambda: self._config(), service=self.service, notifier=notifier)
+        with patch("data_provider.DataFetcherManager", return_value=manager), \
+             patch("src.services.alert_service.asyncio.to_thread", new=_run_inline):
+            first = worker.run_once()
+            second = worker.run_once()
+
+        self.assertEqual(first["triggered"], 1)
+        self.assertEqual(first["recorded"], 1)
+        self.assertEqual(second["triggered"], 1)
+        self.assertEqual(second["recorded"], 0)
+        triggers = self._triggers(rule_id=rule["id"], status="triggered")
+        self.assertEqual(len(triggers), 1)
+        self.assertEqual(triggers[0]["target"], "000858")
+        self.assertEqual(triggers[0]["data_source"], "daily_data")
+        self.assertEqual(triggers[0]["data_timestamp"], "2026-05-15T00:00:00")
+        cooldown_attempts = self._notifications(channel="__cooldown__")
+        self.assertEqual(len(cooldown_attempts), 1)
+        self.assertEqual(cooldown_attempts[0]["trigger_id"], triggers[0]["id"])
+        notifier.send_with_results.assert_called_once()
+
     def test_technical_indicator_rules_share_run_once_daily_cache(self) -> None:
         self._create_rule(
             name="MA one",
@@ -609,8 +712,211 @@ class AlertWorkerTestCase(unittest.TestCase):
 
         self.assertEqual(first["triggered"], 2)
         self.assertEqual(second["triggered"], 2)
+        self.assertEqual(len(self._triggers(status="triggered")), 2)
         self.assertEqual(manager.get_daily_data.call_count, 2)
         manager.get_daily_data.assert_called_with("600519", days=33)
+
+    def test_db_triggered_history_deduplicates_same_daily_signal(self) -> None:
+        rule = self._create_rule(
+            name="MA",
+            target="600519",
+            alert_type="ma_price_cross",
+            parameters={"window": 2, "direction": "above"},
+            cooldown_policy={"cooldown_seconds": 60},
+        )
+        manager = MagicMock()
+        manager.get_daily_data.return_value = (
+            pd.DataFrame({
+                "date": [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)],
+                "close": [10, 9, 12],
+            }),
+            "unit-test",
+        )
+        notifier = self._notifier()
+
+        async def _run_inline(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        worker = AlertWorker(config_provider=lambda: self._config(), service=self.service, notifier=notifier)
+        with patch("data_provider.DataFetcherManager", return_value=manager), \
+             patch("src.services.alert_service.asyncio.to_thread", new=_run_inline):
+            first = worker.run_once()
+            second = worker.run_once()
+
+        self.assertEqual(first["triggered"], 1)
+        self.assertEqual(first["recorded"], 1)
+        self.assertEqual(second["triggered"], 1)
+        self.assertEqual(second["recorded"], 0)
+        triggers = self._triggers(rule_id=rule["id"], status="triggered")
+        self.assertEqual(len(triggers), 1)
+        self.assertEqual(triggers[0]["data_timestamp"], "2026-05-15T00:00:00")
+        cooldown_attempts = self._notifications(channel="__cooldown__")
+        self.assertEqual(len(cooldown_attempts), 1)
+        self.assertEqual(cooldown_attempts[0]["trigger_id"], triggers[0]["id"])
+        notifier.send_with_results.assert_called_once()
+
+    def test_db_triggered_history_keeps_distinct_data_timestamps(self) -> None:
+        rule = self._create_rule(
+            name="MA",
+            target="600519",
+            alert_type="ma_price_cross",
+            parameters={"window": 2, "direction": "above"},
+            cooldown_policy={"cooldown_seconds": 60},
+        )
+        manager = MagicMock()
+        manager.get_daily_data.side_effect = [
+            (
+                pd.DataFrame({
+                    "date": [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)],
+                    "close": [10, 9, 12],
+                }),
+                "unit-test",
+            ),
+            (
+                pd.DataFrame({
+                    "date": [date(2026, 5, 14), date(2026, 5, 15), date(2026, 5, 16)],
+                    "close": [10, 9, 12],
+                }),
+                "unit-test",
+            ),
+        ]
+
+        async def _run_inline(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        worker = AlertWorker(config_provider=lambda: self._config(), service=self.service, notifier=self._notifier())
+        with patch("data_provider.DataFetcherManager", return_value=manager), \
+             patch("src.services.alert_service.asyncio.to_thread", new=_run_inline):
+            first = worker.run_once()
+            second = worker.run_once()
+
+        self.assertEqual(first["recorded"], 1)
+        self.assertEqual(second["recorded"], 1)
+        triggers = self._triggers(rule_id=rule["id"], status="triggered")
+        self.assertEqual(len(triggers), 2)
+        self.assertEqual(
+            {item["data_timestamp"] for item in triggers},
+            {"2026-05-15T00:00:00", "2026-05-16T00:00:00"},
+        )
+
+    def test_cooldown_zero_reuses_same_trigger_history_but_keeps_notifications(self) -> None:
+        rule = self._create_rule(
+            name="MA",
+            target="600519",
+            alert_type="ma_price_cross",
+            parameters={"window": 2, "direction": "above"},
+            cooldown_policy={"cooldown_seconds": 0},
+        )
+        manager = MagicMock()
+        manager.get_daily_data.return_value = (
+            pd.DataFrame({
+                "date": [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)],
+                "close": [10, 9, 12],
+            }),
+            "unit-test",
+        )
+        notifier = self._notifier(self._dispatch_result(True), self._dispatch_result(True))
+
+        async def _run_inline(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        worker = AlertWorker(config_provider=lambda: self._config(), service=self.service, notifier=notifier)
+        with patch("data_provider.DataFetcherManager", return_value=manager), \
+             patch("src.services.alert_service.asyncio.to_thread", new=_run_inline):
+            first = worker.run_once()
+            second = worker.run_once()
+
+        self.assertEqual(first["notified"], 1)
+        self.assertEqual(second["notified"], 1)
+        self.assertEqual(second["recorded"], 0)
+        triggers = self._triggers(rule_id=rule["id"], status="triggered")
+        self.assertEqual(len(triggers), 1)
+        notifications = self._notifications(trigger_id=triggers[0]["id"])
+        self.assertEqual(len(notifications), 2)
+        self.assertEqual(notifier.send_with_results.call_count, 2)
+
+    def test_db_triggered_history_deduplicates_per_rule_id(self) -> None:
+        first_rule = self._create_rule(
+            name="MA one",
+            target="600519",
+            alert_type="ma_price_cross",
+            parameters={"window": 2, "direction": "above"},
+            cooldown_policy={"cooldown_seconds": 60},
+        )
+        second_rule = self._create_rule(
+            name="MA two",
+            target="600519",
+            alert_type="ma_price_cross",
+            parameters={"window": 2, "direction": "above"},
+            cooldown_policy={"cooldown_seconds": 60},
+        )
+        manager = MagicMock()
+        manager.get_daily_data.return_value = (
+            pd.DataFrame({
+                "date": [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)],
+                "close": [10, 9, 12],
+            }),
+            "unit-test",
+        )
+
+        async def _run_inline(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        worker = AlertWorker(config_provider=lambda: self._config(), service=self.service, notifier=self._notifier())
+        with patch("data_provider.DataFetcherManager", return_value=manager), \
+             patch("src.services.alert_service.asyncio.to_thread", new=_run_inline):
+            first = worker.run_once()
+            second = worker.run_once()
+
+        self.assertEqual(first["recorded"], 2)
+        self.assertEqual(second["recorded"], 0)
+        triggers = self._triggers(status="triggered")
+        self.assertEqual(len(triggers), 2)
+        self.assertEqual({item["rule_id"] for item in triggers}, {first_rule["id"], second_rule["id"]})
+
+    def test_non_triggered_status_history_is_not_deduplicated(self) -> None:
+        self._create_rule(name="Skipped", target="600519")
+        self._create_rule(
+            name="Degraded",
+            target="000858",
+            alert_type="volume_spike",
+            parameters={"multiplier": 2.5},
+        )
+        self._create_rule(
+            name="Failed",
+            target="300750",
+            alert_type="price_change_percent",
+            parameters={"direction": "down", "change_pct": 3.0},
+        )
+        status_by_target = {
+            "600519": "skipped",
+            "000858": "degraded",
+            "300750": "failed",
+        }
+
+        async def _evaluate(rule, _monitor, **_kwargs):
+            status = status_by_target[rule.stock_code]
+            return {
+                "rule_id": self.service._runtime_rule_id(rule),
+                "record_status": status,
+                "triggered": False,
+                "observed_value": None,
+                "threshold": self.service._threshold_for_rule(rule),
+                "data_source": self.service._data_source_for_rule(rule),
+                "data_timestamp": None,
+                "reason": f"{status} test",
+                "message": f"{status} test",
+            }
+
+        worker = AlertWorker(config_provider=lambda: self._config(), service=self.service, notifier=self._notifier())
+        with patch.object(self.service, "_evaluate_rule", new=_evaluate):
+            first = worker.run_once()
+            second = worker.run_once()
+
+        self.assertEqual(first["recorded"], 3)
+        self.assertEqual(second["recorded"], 3)
+        for status in ("skipped", "degraded", "failed"):
+            self.assertEqual(len(self._triggers(status=status)), 2)
 
     def test_technical_indicator_insufficient_data_writes_degraded_trigger(self) -> None:
         rule = self._create_rule(

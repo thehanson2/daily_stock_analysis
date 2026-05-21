@@ -11,7 +11,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import litellm
 from litellm import Router
@@ -23,6 +23,7 @@ from src.config import (
     get_configured_llm_models,
     get_effective_agent_models_to_try,
     get_effective_agent_primary_model,
+    resolve_litellm_wire_model,
 )
 from src.llm.errors import call_litellm_with_param_recovery
 from src.llm.generation_params import apply_litellm_generation_params
@@ -102,6 +103,28 @@ _CUSTOM_MODEL_PRICING: Dict[str, dict] = {
     },
 }
 
+_FALLBACK_MODEL_PRICING: Dict[str, Any] = {
+    "supports_function_calling": True,
+    "supports_vision": False,
+    "supports_audio_input": False,
+    "supports_audio_output": False,
+    "context_window": 100000,
+    "max_tokens": 10000,
+    "input_cost_per_token": 0.0,
+    "output_cost_per_token": 0.0,
+}
+_FALLBACK_MODEL_PRICING_REGISTERED: set[str] = set()
+
+
+def _split_provider_model(model: str) -> Tuple[str, str]:
+    normalized = (model or "").strip()
+    if not normalized:
+        return "", ""
+    if "/" in normalized:
+        provider, remainder = normalized.split("/", 1)
+        return provider.lower(), remainder.strip()
+    return "openai", normalized
+
 
 def _model_matches(model: str, entries: List[str]) -> bool:
     """Check if model name matches any entry (exact or prefix with version suffix)."""
@@ -141,6 +164,39 @@ def get_thinking_extra_body(model: str) -> Optional[dict]:
     return _get_opt_in_payload(model, _OPT_IN_THINKING_MODELS)
 
 
+def resolve_fallback_litellm_wire_models(
+    model: str,
+    model_list: Optional[List[Dict[str, Any]]] = None,
+) -> List[str]:
+    """Resolve all wire models reachable from a configured alias."""
+    normalized_model = (model or "").strip()
+    if not normalized_model:
+        return []
+
+    resolved: List[str] = []
+    if model_list:
+        for entry in model_list:
+            if not isinstance(entry, dict):
+                continue
+            entry_model_name = str(entry.get("model_name", "") or "").strip()
+            if not entry_model_name:
+                entry_params = entry.get("litellm_params", {}) or {}
+                entry_model_name = str(entry_params.get("model") or "").strip()
+            if entry_model_name != normalized_model:
+                continue
+
+            entry_params = entry.get("litellm_params", {}) or {}
+            wire_model = str(entry_params.get("model") or normalized_model).strip()
+            if wire_model and wire_model not in resolved:
+                resolved.append(wire_model)
+
+    if not resolved:
+        wire_model = resolve_litellm_wire_model(normalized_model, model_list)
+        if wire_model and wire_model not in resolved:
+            resolved.append(wire_model)
+    return resolved
+
+
 # ============================================================
 # LLM Tool Adapter
 # ============================================================
@@ -178,7 +234,6 @@ class LLMToolAdapter:
                 logger.debug(f"Registered custom pricing for {model_name}")
             except Exception as e:
                 logger.debug(f"Model {model_name} may already be registered or pricing error: {e}")
-
     def _has_channel_config(self) -> bool:
         """Check if multi-channel config (channels / YAML) is active."""
         return bool(self._config.llm_model_list) and not all(
@@ -442,6 +497,9 @@ class LLMToolAdapter:
             self._get_temperature() if temperature is None else temperature,
             model_list=recovery_model_list,
         )
+        register_fallback_model_pricing(
+            resolve_fallback_litellm_wire_models(model, self._config.llm_model_list)
+        )
         if use_channel_router and self._router and model in _router_model_names:
             # Channel / YAML path: Router manages all models in its model_list
             response = call_litellm_with_param_recovery(
@@ -596,3 +654,44 @@ class LLMToolAdapter:
             model=model,
             raw=response,
         )
+
+
+def register_fallback_model_pricing(models: Iterable[str]) -> None:
+    """Register zero-cost pricing for unknown OpenAI-compatible models."""
+    if not models:
+        return
+    register = getattr(litellm, "register_model", None)
+    if not callable(register):
+        return
+    cost_map = getattr(litellm, "model_cost", {})
+    if not isinstance(cost_map, dict):
+        cost_map = {}
+    for model in models:
+        provider, wire_model = _split_provider_model(str(model))
+        if provider != "openai":
+            continue
+        if not wire_model or wire_model.startswith("__legacy_"):
+            continue
+        custom_pricing = _CUSTOM_MODEL_PRICING.get(wire_model)
+        if custom_pricing is not None:
+            if wire_model in cost_map:
+                continue
+            try:
+                register({wire_model: dict(custom_pricing)})
+                logger.debug("Registered custom pricing for %s", wire_model)
+            except Exception as exc:
+                logger.debug(
+                    "Custom pricing registration failed for %s, will try fallback pricing: %s",
+                    wire_model,
+                    exc,
+                )
+            else:
+                continue
+        if wire_model in cost_map or wire_model in _FALLBACK_MODEL_PRICING_REGISTERED:
+            continue
+        try:
+            register({wire_model: dict(_FALLBACK_MODEL_PRICING)})
+            _FALLBACK_MODEL_PRICING_REGISTERED.add(wire_model)
+            logger.debug("Registered fallback pricing for %s", wire_model)
+        except Exception as exc:
+            logger.debug("Fallback pricing registration skipped for %s: %s", wire_model, exc)

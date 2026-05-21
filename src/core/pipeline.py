@@ -30,8 +30,8 @@ from data_provider.realtime_types import ChipDistribution
 from src.analyzer import (
     GeminiAnalyzer,
     AnalysisResult,
-    fill_chip_structure_if_needed,
     fill_price_position_if_needed,
+    normalize_chip_structure_availability,
     stabilize_decision_with_structure,
 )
 from src.data.stock_mapping import STOCK_NAME_MAP
@@ -504,9 +504,9 @@ class StockAnalysisPipeline:
                 result.current_price = realtime_data.get('price')
                 result.change_pct = realtime_data.get('change_pct')
 
-            # Step 7.6: chip_structure fallback (Issue #589)
-            if result and chip_data:
-                fill_chip_structure_if_needed(result, chip_data)
+            # Step 7.6: chip_structure fallback (Issue #589) and unavailable collapse
+            if result:
+                normalize_chip_structure_availability(result, chip_data)
 
             # Step 7.7: price_position fallback
             if result:
@@ -871,8 +871,8 @@ class StockAnalysisPipeline:
                         missing,
                     )
             # chip_structure fallback (Issue #589), before save_analysis_history
-            if result and chip_data:
-                fill_chip_structure_if_needed(result, chip_data)
+            if result and chip_data is not None:
+                normalize_chip_structure_availability(result, chip_data)
 
             # price_position fallback (same as non-agent path Step 7.7)
             if result:

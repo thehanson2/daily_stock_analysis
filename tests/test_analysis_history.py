@@ -647,6 +647,50 @@ class AnalysisHistoryTestCase(unittest.TestCase):
 
         self.assertEqual(markdown, "# 🎯 大盘复盘\n\n## 今日大盘\n\n复盘正文")
 
+    def test_history_markdown_collapses_unavailable_chip_structure(self) -> None:
+        result = AnalysisResult(
+            code="600519",
+            name="贵州茅台",
+            sentiment_score=72,
+            trend_prediction="看多",
+            operation_advice="持有",
+            analysis_summary="稳健",
+            dashboard={
+                "data_perspective": {
+                    "chip_structure": {
+                        "profit_ratio": "数据缺失，无法判断",
+                        "avg_cost": "数据缺失，无法判断",
+                        "concentration": "数据缺失，无法判断",
+                        "chip_health": "数据缺失，无法判断",
+                    }
+                }
+            },
+        )
+
+        saved = self.db.save_analysis_history(
+            result=result,
+            query_id="query_chip_unavailable_001",
+            report_type="full",
+            news_content="news",
+            context_snapshot=None,
+            save_snapshot=False,
+        )
+        self.assertEqual(saved, 1)
+
+        with self.db.get_session() as session:
+            row = session.query(AnalysisHistory).filter(
+                AnalysisHistory.query_id == "query_chip_unavailable_001"
+            ).first()
+            if row is None:
+                self.fail("未找到保存的历史记录")
+            record_id = row.id
+
+        markdown = HistoryService(self.db).get_markdown_report(str(record_id))
+
+        self.assertIsNotNone(markdown)
+        self.assertIn("**筹码**: 筹码分布未启用或数据源暂不可用，未纳入筹码判断。", markdown)
+        self.assertEqual(markdown.count("数据缺失，无法判断"), 0)
+
     def test_history_detail_returns_persisted_market_review_report(self) -> None:
         """Market review detail should surface the saved recap content for Web history clicks."""
         if get_history_detail is None:

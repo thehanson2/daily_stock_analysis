@@ -48,6 +48,12 @@ class DBCooldownDecision:
     fallback_ttl_seconds: Optional[int] = None
 
 
+@dataclass
+class TriggerWriteResult:
+    trigger_id: Optional[int] = None
+    created: bool = False
+
+
 class AlertWorker:
     """Evaluate alert-center rules for schedule-mode background polling."""
 
@@ -131,8 +137,9 @@ class AlertWorker:
 
             record_status = result.get("record_status")
             if record_status in WRITABLE_TRIGGER_STATUSES:
-                trigger_id = self._record_trigger_safely(runtime_rule, result, record_status)
-                if trigger_id is not None:
+                trigger_write = self._record_trigger_safely(runtime_rule, result, record_status)
+                trigger_id = trigger_write.trigger_id
+                if trigger_write.created:
                     stats["recorded"] += 1
                 if record_status in stats and record_status != "triggered":
                     stats[record_status] += 1
@@ -250,7 +257,7 @@ class AlertWorker:
         canonical_params = json.dumps(parameters or {}, ensure_ascii=False, sort_keys=True)
         return f"{target_scope}:{target}:{alert_type}:{canonical_params}"
 
-    def _record_trigger(self, runtime_rule: RuntimeAlertRule, result: Dict[str, Any], status: str) -> Optional[int]:
+    def _record_trigger(self, runtime_rule: RuntimeAlertRule, result: Dict[str, Any], status: str) -> TriggerWriteResult:
         try:
             rule_id = int(result.get("rule_id") or 0) or None
         except (TypeError, ValueError):
@@ -267,15 +274,20 @@ class AlertWorker:
             "status": status,
             "diagnostics": self._diagnostics_for_status(status, result),
         }
-        row = self.service.repo.create_trigger(fields)
-        return int(row.id) if row and row.id is not None else None
+        if self._should_deduplicate_trigger(runtime_rule, fields):
+            row, created = self.service.repo.create_trigger_if_absent(fields)
+        else:
+            row = self.service.repo.create_trigger(fields)
+            created = True
+        trigger_id = int(row.id) if row and row.id is not None else None
+        return TriggerWriteResult(trigger_id=trigger_id, created=created)
 
     def _record_trigger_safely(
         self,
         runtime_rule: RuntimeAlertRule,
         result: Dict[str, Any],
         status: str,
-    ) -> Optional[int]:
+    ) -> TriggerWriteResult:
         try:
             return self._record_trigger(runtime_rule, result, status)
         except Exception as exc:
@@ -284,7 +296,16 @@ class AlertWorker:
                 getattr(runtime_rule.rule, "stock_code", "?"),
                 self.service._sanitize_text(str(exc) or "trigger write failed"),
             )
-            return None
+            return TriggerWriteResult()
+
+    @staticmethod
+    def _should_deduplicate_trigger(runtime_rule: RuntimeAlertRule, fields: Dict[str, Any]) -> bool:
+        return (
+            runtime_rule.source == "db"
+            and fields.get("status") == "triggered"
+            and fields.get("rule_id") is not None
+            and fields.get("data_timestamp") is not None
+        )
 
     @staticmethod
     def _optional_float(value: Any) -> Optional[float]:

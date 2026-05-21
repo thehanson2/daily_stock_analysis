@@ -250,7 +250,7 @@ model_list:
 
 ### GitHub Actions Notes
 
-The bundled `daily_analysis.yml` explicitly passes the common LLM runtime fields to the job environment:
+The bundled `00-daily-analysis.yml` explicitly passes the common LLM runtime fields to the job environment:
 
 - Runtime selection: `LLM_CHANNELS`, `LITELLM_MODEL`, `LITELLM_FALLBACK_MODELS`, `AGENT_LITELLM_MODEL`, `VISION_MODEL`, `VISION_PROVIDER_PRIORITY`, `LLM_TEMPERATURE`
 - Multiple keys: `GEMINI_API_KEYS`, `ANTHROPIC_API_KEYS`, `OPENAI_API_KEYS`, `DEEPSEEK_API_KEYS` (the current workflow imports these from repository Secrets only, not from same-named Variables)

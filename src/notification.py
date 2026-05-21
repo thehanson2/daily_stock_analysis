@@ -39,6 +39,8 @@ from src.report_language import (
     get_localized_stock_name,
     get_report_labels,
     get_signal_level,
+    get_chip_unavailable_reason,
+    is_chip_structure_unavailable,
     localize_chip_health,
     localize_operation_advice,
     localize_trend_prediction,
@@ -1125,12 +1127,25 @@ class NotificationService(
                         ])
                     # 筹码结构
                     if chip_data:
-                        chip_health = localize_chip_health(chip_data.get('chip_health', 'N/A'), report_language)
-                        report_lines.extend([
-                            f"**{labels['chip_label']}**: {chip_data.get('profit_ratio', 'N/A')} | {chip_data.get('avg_cost', 'N/A')} | "
-                            f"{chip_data.get('concentration', 'N/A')} {chip_health}",
-                            "",
-                        ])
+                        if is_chip_structure_unavailable(chip_data):
+                            report_lines.extend([
+                                f"**{labels['chip_label']}**: {get_chip_unavailable_reason(chip_data, report_language)}",
+                                "",
+                            ])
+                        else:
+                            chip_health = localize_chip_health(chip_data.get('chip_health', 'N/A'), report_language)
+                            report_lines.extend([
+                                f"**{labels['chip_label']}**: {chip_data.get('profit_ratio', 'N/A')} | {chip_data.get('avg_cost', 'N/A')} | "
+                                f"{chip_data.get('concentration', 'N/A')} {chip_health}",
+                                "",
+                            ])
+                    else:
+                        chip_unavailable_reason = get_chip_unavailable_reason(data_persp, report_language)
+                        if chip_unavailable_reason:
+                            report_lines.extend([
+                                f"**{labels['chip_label']}**: {chip_unavailable_reason}",
+                                "",
+                            ])
                 
                 # ========== 作战计划 ==========
                 battle = dashboard.get('battle_plan', {}) if dashboard else {}

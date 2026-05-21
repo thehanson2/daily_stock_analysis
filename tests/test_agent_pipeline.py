@@ -1462,6 +1462,82 @@ class TestAnalyzeWithAgentStockName(unittest.TestCase):
             self.assertEqual(result.dashboard.get("operation_advice"), "洗盘观察")
             self.assertEqual(result.dashboard.get("sentiment_score"), result.sentiment_score)
 
+    def test_analyze_with_agent_preserves_chip_structure_when_prefetch_missing(self):
+        """Agent tool chip metrics should not be cleared when prefetch chip_data is unavailable."""
+        with patch('src.core.pipeline.get_config') as mock_config, \
+             patch('src.core.pipeline.get_db'), \
+             patch('src.core.pipeline.DataFetcherManager'), \
+             patch('src.core.pipeline.GeminiAnalyzer'), \
+             patch('src.core.pipeline.NotificationService'), \
+             patch('src.core.pipeline.SearchService'), \
+             patch('src.agent.factory.build_agent_executor') as mock_build_executor:
+
+            mock_cfg = MagicMock()
+            mock_cfg.max_workers = 2
+            mock_cfg.agent_mode = True
+            mock_cfg.agent_max_steps = 10
+            mock_cfg.agent_skills = []
+            mock_cfg.bocha_api_keys = []
+            mock_cfg.tavily_api_keys = []
+            mock_cfg.brave_api_keys = []
+            mock_cfg.serpapi_keys = []
+            mock_cfg.searxng_base_urls = []
+            mock_cfg.searxng_public_instances_enabled = False
+            mock_cfg.news_max_age_days = 7
+            mock_cfg.enable_realtime_quote = True
+            mock_cfg.enable_chip_distribution = True
+            mock_cfg.realtime_source_priority = []
+            mock_cfg.save_context_snapshot = False
+            mock_cfg.report_language = "zh"
+            mock_cfg.report_integrity_enabled = False
+            mock_cfg.agent_orchestrator_timeout_s = 600
+            mock_config.return_value = mock_cfg
+
+            from src.core.pipeline import StockAnalysisPipeline
+            from src.agent.executor import AgentResult
+            from src.enums import ReportType
+            pipeline = StockAnalysisPipeline(config=mock_cfg)
+            pipeline.search_service.is_available = False
+
+            agent_result = AgentResult(
+                success=True,
+                content="{}",
+                dashboard={
+                    "sentiment_score": 70,
+                    "trend_prediction": "震荡",
+                    "operation_advice": "持有",
+                    "decision_type": "hold",
+                    "dashboard": {
+                        "data_perspective": {
+                            "chip_structure": {
+                                "profit_ratio": "52.0%",
+                                "avg_cost": 1850.0,
+                                "concentration": "0.00%",
+                                "chip_health": "健康",
+                            }
+                        }
+                    },
+                },
+                provider="gemini",
+            )
+            mock_executor = MagicMock()
+            mock_executor.run.return_value = agent_result
+            mock_build_executor.return_value = mock_executor
+
+            result = pipeline._analyze_with_agent(
+                code="600519",
+                report_type=ReportType.SIMPLE,
+                query_id="q-agent-chip",
+                stock_name="贵州茅台",
+                realtime_quote=None,
+                chip_data=None,
+            )
+
+            self.assertIsNotNone(result)
+            dp = result.dashboard["data_perspective"]
+            self.assertEqual(dp["chip_structure"]["concentration"], "0.00%")
+            self.assertNotIn("chip_unavailable_reason", dp)
+
 
 # ============================================================
 # Agent construction chain (real objects, mocked LLM)

@@ -8,14 +8,14 @@ from datetime import date
 from unittest.mock import patch
 
 import pandas as pd
-from sqlalchemy import and_, select
+from sqlalchemy import and_, create_engine as sqlalchemy_create_engine, select
 from sqlalchemy.sql import func
 
 # Ensure src module can be imported
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.config import Config
-from src.storage import DatabaseManager, StockDaily
+from src.storage import Base, DatabaseManager, StockDaily
 
 class TestStorage(unittest.TestCase):
     
@@ -132,6 +132,211 @@ class TestStorage(unittest.TestCase):
                 else:
                     os.environ[key] = value
             temp_dir.cleanup()
+
+    def test_get_instance_waits_for_cold_start_initialization(self):
+        DatabaseManager.reset_instance()
+        Config.reset_instance()
+        temp_dir = tempfile.TemporaryDirectory()
+        db_path = os.path.join(temp_dir.name, "sqlite_cold_start.db")
+        original_database_path = os.environ.get("DATABASE_PATH")
+        create_all_entered = threading.Event()
+        competitor_entered = threading.Event()
+        release_create_all = threading.Event()
+        competitor_done = threading.Event()
+        state_lock = threading.Lock()
+        init_errors = []
+        competitor_errors = []
+        instances = []
+        query_values = []
+        original_create_all = Base.metadata.create_all
+
+        def delayed_create_all(bind, *args, **kwargs):
+            create_all_entered.set()
+            if not release_create_all.wait(timeout=5):
+                raise TimeoutError("Timed out waiting to release create_all")
+            return original_create_all(bind, *args, **kwargs)
+
+        def initialize_manager() -> None:
+            try:
+                db = DatabaseManager.get_instance()
+                with state_lock:
+                    instances.append(db)
+            except Exception as exc:
+                with state_lock:
+                    init_errors.append(exc)
+
+        def use_manager() -> None:
+            try:
+                competitor_entered.set()
+                db = DatabaseManager.get_instance()
+                session = db.get_session()
+                try:
+                    value = session.connection().exec_driver_sql("SELECT 1").scalar()
+                finally:
+                    session.close()
+                with state_lock:
+                    instances.append(db)
+                    query_values.append(value)
+            except Exception as exc:
+                with state_lock:
+                    competitor_errors.append(exc)
+            finally:
+                competitor_done.set()
+
+        try:
+            os.environ["DATABASE_PATH"] = db_path
+            Config.reset_instance()
+            with patch.object(Base.metadata, "create_all", side_effect=delayed_create_all):
+                init_thread = threading.Thread(target=initialize_manager)
+                competitor_thread = threading.Thread(target=use_manager)
+
+                init_thread.start()
+                self.assertTrue(create_all_entered.wait(timeout=5))
+
+                competitor_thread.start()
+                self.assertTrue(competitor_entered.wait(timeout=5))
+                self.assertFalse(
+                    competitor_done.wait(timeout=0.2),
+                    "DatabaseManager.get_instance() returned before initialization completed",
+                )
+
+                release_create_all.set()
+                init_thread.join(timeout=5)
+                competitor_thread.join(timeout=5)
+
+                self.assertFalse(init_thread.is_alive())
+                self.assertFalse(competitor_thread.is_alive())
+
+            self.assertEqual(init_errors, [])
+            self.assertEqual(competitor_errors, [])
+            self.assertEqual(query_values, [1])
+            self.assertEqual(len({id(instance) for instance in instances}), 1)
+        finally:
+            release_create_all.set()
+            DatabaseManager.reset_instance()
+            Config.reset_instance()
+            if original_database_path is None:
+                os.environ.pop("DATABASE_PATH", None)
+            else:
+                os.environ["DATABASE_PATH"] = original_database_path
+            temp_dir.cleanup()
+
+    def test_direct_construction_serializes_before_get_instance(self):
+        DatabaseManager.reset_instance()
+        Config.reset_instance()
+        temp_dir = tempfile.TemporaryDirectory()
+        direct_db_path = os.path.join(temp_dir.name, "direct.db")
+        env_db_path = os.path.join(temp_dir.name, "env.db")
+        direct_db_url = f"sqlite:///{direct_db_path}"
+        original_database_path = os.environ.get("DATABASE_PATH")
+        direct_init_entered = threading.Event()
+        competitor_entered = threading.Event()
+        allow_direct_init = threading.Event()
+        competitor_done = threading.Event()
+        state_lock = threading.Lock()
+        errors = []
+        instances = []
+        query_values = []
+        original_init = DatabaseManager.__init__
+
+        def delayed_direct_init(self, db_url=None):
+            if db_url == direct_db_url:
+                direct_init_entered.set()
+                if not competitor_entered.wait(timeout=5):
+                    raise TimeoutError("Timed out waiting for competitor")
+                if not allow_direct_init.wait(timeout=5):
+                    raise TimeoutError("Timed out waiting to initialize direct instance")
+            return original_init(self, db_url=db_url)
+
+        def construct_directly() -> None:
+            try:
+                db = DatabaseManager(db_url=direct_db_url)
+                with state_lock:
+                    instances.append(db)
+            except Exception as exc:
+                with state_lock:
+                    errors.append(exc)
+
+        def use_get_instance() -> None:
+            try:
+                competitor_entered.set()
+                db = DatabaseManager.get_instance()
+                session = db.get_session()
+                try:
+                    value = session.connection().exec_driver_sql("SELECT 1").scalar()
+                finally:
+                    session.close()
+                with state_lock:
+                    instances.append(db)
+                    query_values.append(value)
+            except Exception as exc:
+                with state_lock:
+                    errors.append(exc)
+            finally:
+                competitor_done.set()
+
+        try:
+            os.environ["DATABASE_PATH"] = env_db_path
+            Config.reset_instance()
+            with patch.object(DatabaseManager, "__init__", new=delayed_direct_init):
+                direct_thread = threading.Thread(target=construct_directly)
+                competitor_thread = threading.Thread(target=use_get_instance)
+
+                direct_thread.start()
+                self.assertTrue(direct_init_entered.wait(timeout=5))
+
+                competitor_thread.start()
+                self.assertTrue(competitor_entered.wait(timeout=5))
+                self.assertFalse(
+                    competitor_done.wait(timeout=0.2),
+                    "get_instance() should not initialize over an in-flight direct construction",
+                )
+
+                allow_direct_init.set()
+                direct_thread.join(timeout=5)
+                competitor_thread.join(timeout=5)
+
+                self.assertFalse(direct_thread.is_alive())
+                self.assertFalse(competitor_thread.is_alive())
+
+            self.assertEqual(errors, [])
+            self.assertEqual(query_values, [1])
+            self.assertEqual(len({id(instance) for instance in instances}), 1)
+            self.assertEqual(DatabaseManager._instance._db_url, direct_db_url)
+        finally:
+            allow_direct_init.set()
+            DatabaseManager.reset_instance()
+            Config.reset_instance()
+            if original_database_path is None:
+                os.environ.pop("DATABASE_PATH", None)
+            else:
+                os.environ["DATABASE_PATH"] = original_database_path
+            temp_dir.cleanup()
+
+    def test_init_cleanup_preserves_original_initialization_error(self):
+        DatabaseManager.reset_instance()
+        original_error = RuntimeError("create all failed")
+        cleanup_error = RuntimeError("dispose failed")
+
+        def create_engine_with_failing_dispose(*args, **kwargs):
+            engine = sqlalchemy_create_engine(*args, **kwargs)
+
+            def failing_dispose() -> None:
+                raise cleanup_error
+
+            engine.dispose = failing_dispose
+            return engine
+
+        try:
+            with patch("src.storage.create_engine", side_effect=create_engine_with_failing_dispose):
+                with patch.object(Base.metadata, "create_all", side_effect=original_error):
+                    with self.assertRaisesRegex(RuntimeError, "create all failed") as ctx:
+                        DatabaseManager.get_instance()
+
+            self.assertIs(ctx.exception, original_error)
+            self.assertIsNone(DatabaseManager._instance)
+        finally:
+            DatabaseManager.reset_instance()
 
     def test_sqlite_write_transactions_begin_immediate(self):
         DatabaseManager.reset_instance()

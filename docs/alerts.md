@@ -196,7 +196,7 @@ P3 不做：
 
 P4 让真实告警触发具备可排障的通知结果，并让通过 Alert API 创建的持久化规则具备可重启保持的业务冷却状态。
 
-- 每次真实触发仍写入本轮 `alert_triggers`；即使后续被冷却或通知降噪抑制，也保留“规则确实触发”的审计记录。
+- DB 持久化规则的 `triggered` 历史按 `rule_id + target + data_source + data_timestamp` 做同一数据点去重：同一触发事件只保留最早一条 `alert_triggers`，重复轮询命中会复用已有触发记录；`data_timestamp` 缺失时不做去重，避免误合并无法证明同源的数据点。即使后续被冷却或通知降噪抑制，仍通过 `alert_notifications` 记录对应的通知尝试或 synthetic 抑制状态。
 - `alert_notifications` 记录真实 per-channel notification attempt，包括 `channel`、`success`、`error_code`、`retryable`、`latency_ms` 和脱敏后的 `diagnostics`。
 - 非渠道发送状态使用 synthetic channel 记录：
   - `__cooldown__`：告警业务冷却抑制，`error_code="cooldown_active"`。

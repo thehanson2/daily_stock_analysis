@@ -158,6 +158,42 @@ _NO_DATA_BY_LANGUAGE = {
     "en": "Data unavailable",
 }
 
+_CHIP_UNAVAILABLE_BY_LANGUAGE = {
+    "zh": "筹码分布未启用或数据源暂不可用，未纳入筹码判断。",
+    "en": "Chip distribution is disabled or temporarily unavailable; chip signals were not used.",
+}
+
+_CHIP_PLACEHOLDER_EXACT = {
+    "",
+    "n/a",
+    "na",
+    "none",
+    "null",
+    "unknown",
+    "tbd",
+    "数据缺失",
+    "未知",
+    "暂无",
+    "待补充",
+}
+
+_CHIP_PLACEHOLDER_HINTS = (
+    "数据缺失",
+    "无法判断",
+    "data unavailable",
+    "unavailable",
+    "not available",
+    "missing",
+    "not supported",
+)
+
+_CHIP_METRIC_KEYS = ("profit_ratio", "avg_cost", "concentration")
+_CHIP_UNAVAILABLE_REASON_KEYS = (
+    "chip_unavailable_reason",
+    "unavailable_reason",
+    "chip_unavailable",
+)
+
 _GENERIC_STOCK_NAME_BY_LANGUAGE = {
     "zh": "待确认股票",
     "en": "Unnamed Stock",
@@ -409,6 +445,11 @@ def get_no_data_text(language: Optional[str]) -> str:
     return _NO_DATA_BY_LANGUAGE[normalize_report_language(language)]
 
 
+def get_chip_unavailable_text(language: Optional[str]) -> str:
+    """Return the localized one-line chip distribution fallback text."""
+    return _CHIP_UNAVAILABLE_BY_LANGUAGE[normalize_report_language(language)]
+
+
 def _normalize_lookup_key(value: Any) -> str:
     return str(value or "").strip().lower().replace("_", " ").replace("-", " ")
 
@@ -561,6 +602,54 @@ def localize_chip_health(value: Any, language: Optional[str]) -> str:
         canonical_map=_CHIP_HEALTH_CANONICAL_MAP,
         translations=_CHIP_HEALTH_TRANSLATIONS,
     )
+
+
+def is_chip_placeholder_value(value: Any) -> bool:
+    """Return True for chip fields filled with empty or no-data placeholders."""
+    if value is None:
+        return True
+    if isinstance(value, (int, float)) and value == 0:
+        return True
+    text = str(value).strip()
+    lowered = text.lower()
+    if lowered in _CHIP_PLACEHOLDER_EXACT:
+        return True
+    return any(hint in lowered for hint in _CHIP_PLACEHOLDER_HINTS)
+
+
+def is_chip_structure_unavailable(chip_data: Any) -> bool:
+    """Detect chip_structure blocks that contain only unavailable placeholders."""
+    if not isinstance(chip_data, dict) or not chip_data:
+        return False
+    for key in _CHIP_UNAVAILABLE_REASON_KEYS:
+        raw = chip_data.get(key)
+        if isinstance(raw, bool):
+            if raw:
+                return True
+            continue
+        if str(raw or "").strip():
+            return True
+    if any(key in chip_data for key in _CHIP_METRIC_KEYS):
+        return all(is_chip_placeholder_value(chip_data.get(key)) for key in _CHIP_METRIC_KEYS)
+    return all(is_chip_placeholder_value(value) for value in chip_data.values())
+
+
+def get_chip_unavailable_reason(value: Any, language: Optional[str]) -> str:
+    """Return the explicit or default chip unavailable reason for rendering."""
+    if not isinstance(value, dict) or not value:
+        return ""
+    for key in _CHIP_UNAVAILABLE_REASON_KEYS:
+        raw = value.get(key)
+        if isinstance(raw, bool):
+            if raw:
+                return get_chip_unavailable_text(language)
+            continue
+        text = str(raw or "").strip()
+        if text:
+            return text
+    if is_chip_structure_unavailable(value):
+        return get_chip_unavailable_text(language)
+    return ""
 
 
 def localize_bias_status(value: Any, language: Optional[str]) -> str:

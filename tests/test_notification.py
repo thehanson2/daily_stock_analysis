@@ -489,6 +489,34 @@ class TestNotificationServiceReportGeneration(unittest.TestCase):
         self.assertIn("*分析模型：gemini/gemini-2.5-flash*", out)
 
     @mock.patch("src.notification.get_config")
+    def test_generate_dashboard_report_collapses_unavailable_chip_structure(self, mock_get_config: mock.MagicMock):
+        mock_get_config.return_value = _make_config(report_renderer_enabled=False)
+        service = NotificationService()
+        result = AnalysisResult(
+            code="600519",
+            name="贵州茅台",
+            sentiment_score=72,
+            trend_prediction="看多",
+            operation_advice="持有",
+            analysis_summary="稳健",
+            dashboard={
+                "data_perspective": {
+                    "chip_structure": {
+                        "profit_ratio": "数据缺失，无法判断",
+                        "avg_cost": "数据缺失，无法判断",
+                        "concentration": "数据缺失，无法判断",
+                        "chip_health": "数据缺失，无法判断",
+                    }
+                }
+            },
+        )
+
+        out = service.generate_dashboard_report([result], report_date="2026-02-01")
+
+        self.assertIn("**筹码**: 筹码分布未启用或数据源暂不可用，未纳入筹码判断。", out)
+        self.assertEqual(out.count("数据缺失，无法判断"), 0)
+
+    @mock.patch("src.notification.get_config")
     def test_generate_reports_hide_model_when_disabled(self, mock_get_config: mock.MagicMock):
         mock_get_config.return_value = _make_config(
             report_renderer_enabled=False,
