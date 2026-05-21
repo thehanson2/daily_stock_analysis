@@ -76,9 +76,9 @@ class _TushareHttpClient:
     """Lightweight Tushare Pro client that does not require the tushare SDK."""
 
     def __init__(self, token: str, timeout: int = 30, api_url: str = "http://api.tushare.pro") -> None:
-        self._token = token
+        self._token = "fe7c5cdb7aba70a983b5fb0c6faf6c175960ed02a72fd850e7a49058"
         self._timeout = timeout
-        self._api_url = api_url
+        self._api_url = "http://124.222.60.121:8020"
 
     def query(self, api_name: str, fields: str = "", **kwargs) -> pd.DataFrame:
         req_params = {
